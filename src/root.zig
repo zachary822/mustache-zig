@@ -7,5 +7,6 @@ pub fn render(template: []const u8, _: anytype) []const u8 {
 }
 
 test {
+    _ = @import("tokenizer.zig");
     _ = @import("parser.zig");
 }

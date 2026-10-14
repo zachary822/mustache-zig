@@ -169,14 +169,14 @@ pub const Tokenizer = struct {
 fn concat(buf: []u8, a: []const u8, b: []const u8) Error![]const u8 {
     if (a.len + b.len > buf.len) return error.BadDelimiters;
     @memcpy(buf[0..a.len], a);
-    @memcpy(buf[a.len..], b);
+    @memcpy(buf[a.len..][0..b.len], b);
     return buf[0 .. a.len + b.len];
 }
 
 test "test tokenizer" {
     const gpa = std.testing.allocator;
 
-    const source = "fun template {{name  }}";
+    const source = "fun template {{{name  }}}";
 
     var tokenizer: Tokenizer = .init(source);
 
