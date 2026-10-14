@@ -122,3 +122,15 @@ pub fn parseComptime(comptime src: []const u8) []const Node {
         return &final;
     }
 }
+
+test "parse comptime" {
+    const src =
+        \\ test template {{>hmm}} {{fun}}
+    ;
+
+    const nodes = comptime parseComptime(src);
+    try std.testing.expectEqualStrings(nodes[0].text, " test template ");
+    try std.testing.expectEqualStrings(nodes[1].partial.name, "hmm");
+    try std.testing.expectEqualStrings(nodes[2].text, " ");
+    try std.testing.expectEqualStrings(nodes[3].variable.name, "fun");
+}
