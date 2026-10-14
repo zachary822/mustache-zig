@@ -49,6 +49,7 @@ pub const Tokenizer = struct {
     pos: usize = 0,
     open: []const u8 = "{{",
     close: []const u8 = "}}",
+    delims: []const u8 = "",
 
     last_tag_end: usize = 0,
 
@@ -125,9 +126,10 @@ pub const Tokenizer = struct {
         if (value.len == 0 and kind != .comment) return error.EmptyTag;
 
         if (kind != .comment and kind != .set_delimiters) {
-            for (value) |ch| {
-                if (std.ascii.isWhitespace(ch)) return error.BadName;
-            }
+            for (value) |ch| switch (ch) {
+                ' ', '\t', '\r', '\n' => return error.BadName,
+                else => {},
+            };
             // {{{ }}} tags cannot contain }} inside it
             if (close.len != self.close.len and std.mem.find(u8, value, self.close) != null) return error.BadName;
         }
@@ -187,6 +189,6 @@ test "test tokenizer" {
         try tokens.append(gpa, token);
     }
 
-    try std.testing.expectEqualStrings(tokens.items[0].value, "fun template ");
-    try std.testing.expectEqualStrings(tokens.items[1].value, "name");
+    try std.testing.expectEqualStrings("fun template ", tokens.items[0].value);
+    try std.testing.expectEqualStrings("name", tokens.items[1].value);
 }

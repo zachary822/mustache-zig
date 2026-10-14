@@ -10,6 +10,7 @@ pub const Node = union(enum) {
         inverted: bool,
         end: u32,
         raw: []const u8,
+        delims: []const u8 = "",
     },
     partial: struct { name: []const u8, indent: []const u8 },
 };
@@ -19,12 +20,21 @@ pub const Error = tokenizer.Error || error{ UnclosedSection, UnexpectedClose, Mi
 pub const max_depth = 64;
 
 pub fn parseWith(src: []const u8, sink: anytype) Error!usize {
+    return parseWithDelims(src, "", sink);
+}
+
+pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Error!usize {
     const Open = struct { node: u32, name: []const u8, body_start: usize };
     var stack: [max_depth]Open = undefined;
     var depth: usize = 0;
 
     var n: u32 = 0;
     var tz: Tokenizer = .init(src);
+    const start = splitDelims(start_delims);
+    tz.open = start[0];
+    tz.close = start[1];
+    tz.delims = start_delims;
+
     while (try tz.next()) |tok| {
         const node: ?Node = switch (tok.kind) {
             .text => .{ .text = tok.value },
@@ -42,6 +52,7 @@ pub fn parseWith(src: []const u8, sink: anytype) Error!usize {
                         .inverted = tok.kind == .inverted,
                         .end = 0, // set when we see the close tag
                         .raw = "",
+                        .delims = tz.delims,
                     },
                 };
             },
@@ -61,6 +72,14 @@ pub fn parseWith(src: []const u8, sink: anytype) Error!usize {
     }
     if (depth != 0) return error.UnclosedSection;
     return n;
+}
+
+pub fn splitDelims(d: []const u8) [2][]const u8 {
+    if (d.len == 0) return .{ "{{", "}}" };
+    var parts = std.mem.tokenizeAny(u8, d, " \t\r\n");
+    const o = parts.next() orelse "{{";
+    const c = parts.next() orelse "}}";
+    return .{ o, c };
 }
 
 const CountSink = struct {
@@ -104,11 +123,15 @@ pub fn parseInto(src: []const u8, out: ?[]Node) Error!usize {
 }
 
 pub fn parse(gpa: std.mem.Allocator, src: []const u8) Error![]Node {
+    return parseDelims(gpa, src, "");
+}
+
+pub fn parseDelims(gpa: std.mem.Allocator, src: []const u8, start_delim: []const u8) Error![]Node {
     var sink: ListSink = .{ .gpa = gpa };
     errdefer sink.list.deinit(gpa);
 
     sink.list.ensureTotalCapacity(gpa, @min(src.len / 16 + 4, 256)) catch return error.OutOfMemory;
-    _ = try parseWith(src, &sink);
+    _ = try parseWithDelims(src, start_delim, &sink);
     return sink.list.toOwnedSlice(gpa) catch return error.OutOfMemory;
 }
 

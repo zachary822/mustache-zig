@@ -120,6 +120,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/gen_spec_tests.zig"),
             .target = b.graph.host,
+            .optimize = optimize,
         }),
     });
     const gen_run = b.addRunArtifact(gen);
@@ -132,6 +133,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = spec_tests_zig,
             .target = target,
+            .optimize = optimize,
             .imports = &.{.{ .name = "mustache_zig", .module = mod }},
         }),
         .filters = test_filters,
