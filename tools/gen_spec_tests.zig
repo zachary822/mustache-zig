@@ -19,7 +19,7 @@ const SpecTest = struct {
 fn writeLiteral(w: *Io.Writer, v: json.Value) !void {
     switch (v) {
         .null => try w.writeAll("null"),
-        .bool => |b| try w.print("{}", .{b}),
+        .bool => |b| try w.writeAll(if (b) "true" else "false"),
         inline .integer, .float => |n| try w.print("{d}", .{n}),
         .number_string => |s| try w.writeAll(s),
         .string => |s| try w.print("\"{f}\"", .{std.zig.fmtString(s)}),
@@ -32,6 +32,7 @@ fn writeLiteral(w: *Io.Writer, v: json.Value) !void {
             try w.writeAll("}");
         },
         .object => |o| {
+            if (o.count() == 0) return w.writeAll("struct {}{}");
             try w.writeAll(".{ ");
             var oit = o.iterator();
             while (oit.next()) |kv| {
@@ -60,6 +61,14 @@ pub fn main(init: std.process.Init) !void {
         \\const std = @import("std");
         \\const mustache = @import("mustache_zig");
         \\
+        \\fn check(comptime template: []const u8, data: anytype, comptime partials: anytype, expected: []const u8) !void {
+        \\    const gpa = std.testing.allocator;
+        \\    const got = try mustache.allocRender(gpa, template, data, partials);
+        \\    defer gpa.free(got);
+        \\    try std.testing.expectEqualStrings(expected, got);
+        \\}
+        \\
+        \\
     );
 
     var dir = try Io.Dir.cwd().openDir(io, spec_path, .{ .iterate = true });
@@ -78,16 +87,15 @@ pub fn main(init: std.process.Init) !void {
             try w.print("test \"{f}\" {{\n", .{std.zig.fmtString(name)});
             try w.writeAll("    const data = ");
             try writeLiteral(w, t.data);
+            try w.writeAll(";\n    const partials = ");
+            try writeLiteral(w, t.partials orelse .{ .object = .empty });
             try w.print(
                 \\;
-                \\    try std.testing.expectEqualStrings(
-                \\        "{f}",
-                \\        mustache.render("{f}", data),
-                \\    );
+                \\    try check("{f}", data, partials, "{f}");
                 \\}}
                 \\
                 \\
-            , .{ std.zig.fmtString(t.expected), std.zig.fmtString(t.template) });
+            , .{ std.zig.fmtString(t.template), std.zig.fmtString(t.expected) });
         }
     }
 

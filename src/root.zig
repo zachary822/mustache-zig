@@ -2,8 +2,10 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub fn render(template: []const u8, _: anytype) []const u8 {
-    return template;
+pub fn allocRender(gpa: std.mem.Allocator, template: []const u8, data: anytype, partials: anytype) ![]u8 {
+    _ = data;
+    _ = partials;
+    return gpa.dupe(u8, template);
 }
 
 test {
