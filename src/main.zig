@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     const data: std.json.Value = if (args.len > 2) blk: {
         const src = Io.Dir.cwd().readFileAlloc(io, args[2], arena, .limited(1 << 30)) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[1], e });
+            std.debug.print("{s}: {t}\n", .{ args[2], e });
             return 1;
         };
         break :blk std.json.parseFromSliceLeaky(std.json.Value, arena, src, .{}) catch |e| {
@@ -26,13 +26,13 @@ pub fn main(init: std.process.Init) !u8 {
             return 1;
         };
     } else .{ .object = .empty };
-    const partials = if (args.len > 2) blk: {
+    const partials = if (args.len > 3) blk: {
         const src = Io.Dir.cwd().readFileAlloc(io, args[3], arena, .limited(1 << 30)) catch |e| {
             std.debug.print("{s}: {t}\n", .{ args[3], e });
             return 1;
         };
         break :blk std.json.parseFromSliceLeaky(std.json.Value, arena, src, .{}) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[1], e });
+            std.debug.print("{s}: {t}\n", .{ args[3], e });
             return 1;
         };
     } else .null;
