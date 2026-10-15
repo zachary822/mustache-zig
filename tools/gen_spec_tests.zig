@@ -45,6 +45,27 @@ fn writeLiteral(w: *Io.Writer, v: json.Value) !void {
     }
 }
 
+/// Spec files to generate tests for. ~lambdas.json is left out: its data
+/// holds lambda source code for other languages, which we cannot run.
+const spec_files = blk: {
+    var files = [_][]const u8{
+        "comments.json",
+        "delimiters.json",
+        "interpolation.json",
+        "inverted.json",
+        "partials.json",
+        "sections.json",
+        "~dynamic-names.json",
+        "~inheritance.json",
+    };
+    std.mem.sort([]const u8, &files, {}, lessThan);
+    break :blk files;
+};
+
+fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
@@ -66,24 +87,26 @@ pub fn main(init: std.process.Init) !void {
         \\    const got = try mustache.allocRender(gpa, template, data, partials);
         \\    defer gpa.free(got);
         \\    try std.testing.expectEqualStrings(expected, got);
+        \\
+        \\    // The same case with a comptime template.
+        \\    const T = mustache.Comptime(template, partials);
+        \\    const got2 = try T.renderAlloc(gpa, data);
+        \\    defer gpa.free(got2);
+        \\    try std.testing.expectEqualStrings(expected, got2);
         \\}
         \\
         \\
     );
 
-    var dir = try Io.Dir.cwd().openDir(io, spec_path, .{ .iterate = true });
+    var dir = try Io.Dir.cwd().openDir(io, spec_path, .{});
     defer dir.close(io);
 
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-
-        const bytes = try dir.readFileAlloc(io, entry.name, arena, .limited(1024 * 1024));
+    for (spec_files) |file_name| {
+        const bytes = try dir.readFileAlloc(io, file_name, arena, .limited(1024 * 1024));
         const parsed = try std.json.parseFromSliceLeaky(SpecFile, arena, bytes, .{ .ignore_unknown_fields = true });
 
         for (parsed.tests, 0..) |t, i| {
-            const name = try std.fmt.allocPrint(arena, "{s} #{d}: {s}", .{ entry.name, i, t.name });
+            const name = try std.fmt.allocPrint(arena, "{s} #{d}: {s}", .{ file_name, i, t.name });
             try w.print("test \"{f}\" {{\n", .{std.zig.fmtString(name)});
             try w.writeAll("    const data = ");
             try writeLiteral(w, t.data);

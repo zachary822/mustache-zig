@@ -192,3 +192,10 @@ test "test tokenizer" {
     try std.testing.expectEqualStrings("fun template ", tokens.items[0].value);
     try std.testing.expectEqualStrings("name", tokens.items[1].value);
 }
+
+test "names with whitespace" {
+    var a: Tokenizer = .init("{{a b}}");
+    try std.testing.expectError(error.BadName, a.next());
+    var b: Tokenizer = .init("{{a\x0bb}}");
+    try std.testing.expectEqualStrings("a\x0bb", (try b.next()).?.value);
+}
