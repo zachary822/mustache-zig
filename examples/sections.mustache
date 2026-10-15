@@ -1,0 +1,17 @@
+Items:
+{{#items}}
+  - {{name}}: {{price}}{{#sale}} (on sale){{/sale}}
+{{/items}}
+{{^items}}
+  No items.
+{{/items}}
+Empty list:
+{{#empty}}
+  This line is not in the output.
+{{/empty}}
+{{^empty}}
+  The list is empty.
+{{/empty}}
+Tags: {{#tags}}[{{.}}]{{/tags}}
+Owner: {{#owner}}{{first}} {{last}}{{/owner}}
+Context lookup: {{#owner}}{{store}}{{/owner}}

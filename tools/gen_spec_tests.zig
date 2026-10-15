@@ -32,6 +32,7 @@ fn writeLiteral(w: *Io.Writer, v: json.Value) !void {
             try w.writeAll("}");
         },
         .object => |o| {
+            if (isCode(v)) return w.writeAll("&L.f");
             if (o.count() == 0) return w.writeAll("struct {}{}");
             try w.writeAll(".{ ");
             var oit = o.iterator();
@@ -45,8 +46,42 @@ fn writeLiteral(w: *Io.Writer, v: json.Value) !void {
     }
 }
 
-/// Spec files to generate tests for. ~lambdas.json is left out: its data
-/// holds lambda source code for other languages, which we cannot run.
+/// Spec lambdas are source code for other languages, in objects tagged
+/// `"__tag__": "code"`.
+fn isCode(v: json.Value) bool {
+    if (v != .object) return false;
+    const tag = v.object.get("__tag__") orelse return false;
+    return tag == .string and std.mem.eql(u8, tag.string, "code");
+}
+
+fn hasCode(v: json.Value) bool {
+    if (isCode(v)) return true;
+    switch (v) {
+        .array => |a| for (a.items) |item| if (hasCode(item)) return true,
+        .object => |o| for (o.values()) |item| if (hasCode(item)) return true,
+        else => {},
+    }
+    return false;
+}
+
+/// Zig versions of the spec lambdas, keyed by test name. Each body is the
+/// body of `fn f(text: []const u8, out: *std.Io.Writer) std.Io.Writer.Error!void`.
+/// `calls` is a counter that is set to 0 before each render.
+const lambdas = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "Interpolation", "_ = text; try out.writeAll(\"world\");" },
+    .{ "Interpolation - Expansion", "_ = text; try out.writeAll(\"{{planet}}\");" },
+    .{ "Interpolation - Alternate Delimiters", "_ = text; try out.writeAll(\"|planet| => {{planet}}\");" },
+    .{ "Interpolation - Multiple Calls", "_ = text; calls += 1; try out.print(\"{d}\", .{calls});" },
+    .{ "Escaping", "_ = text; try out.writeAll(\">\");" },
+    .{ "Section", "try out.writeAll(if (std.mem.eql(u8, text, \"{{x}}\")) \"yes\" else \"no\");" },
+    .{ "Section - Expansion", "try out.writeAll(text); try out.writeAll(\"{{planet}}\"); try out.writeAll(text);" },
+    .{ "Section - Alternate Delimiters", "try out.writeAll(text); try out.writeAll(\"{{planet}} => |planet|\"); try out.writeAll(text);" },
+    .{ "Section - Multiple Calls", "try out.writeAll(\"__\"); try out.writeAll(text); try out.writeAll(\"__\");" },
+    // The spec lambda returns false, but it is never called: a lambda is truthy.
+    .{ "Inverted Section", "_ = text; _ = out;" },
+});
+
+/// Spec files to generate tests for.
 const spec_files = blk: {
     var files = [_][]const u8{
         "comments.json",
@@ -57,6 +92,7 @@ const spec_files = blk: {
         "sections.json",
         "~dynamic-names.json",
         "~inheritance.json",
+        "~lambdas.json",
     };
     std.mem.sort([]const u8, &files, {}, lessThan);
     break :blk files;
@@ -82,13 +118,22 @@ pub fn main(init: std.process.Init) !void {
         \\const std = @import("std");
         \\const mustache = @import("mustache_zig");
         \\
+        \\fn noReset() void {}
+        \\
         \\fn check(comptime template: []const u8, data: anytype, comptime partials: anytype, expected: []const u8) !void {
+        \\    return checkReset(noReset, template, data, partials, expected);
+        \\}
+        \\
+        \\/// `reset` is called before each render, so stateful lambdas start over.
+        \\fn checkReset(comptime reset: fn () void, comptime template: []const u8, data: anytype, comptime partials: anytype, expected: []const u8) !void {
         \\    const gpa = std.testing.allocator;
+        \\    reset();
         \\    const got = try mustache.allocRender(gpa, template, data, partials);
         \\    defer gpa.free(got);
         \\    try std.testing.expectEqualStrings(expected, got);
         \\
         \\    // The same case with a comptime template.
+        \\    reset();
         \\    const T = mustache.Comptime(template, partials);
         \\    const got2 = try T.renderAlloc(gpa, data);
         \\    defer gpa.free(got2);
@@ -108,13 +153,32 @@ pub fn main(init: std.process.Init) !void {
         for (parsed.tests, 0..) |t, i| {
             const name = try std.fmt.allocPrint(arena, "{s} #{d}: {s}", .{ file_name, i, t.name });
             try w.print("test \"{f}\" {{\n", .{std.zig.fmtString(name)});
+            const lambda = hasCode(t.data);
+            if (lambda) {
+                const body = lambdas.get(t.name) orelse {
+                    std.debug.print("{s}: no Zig lambda for this test\n", .{name});
+                    return error.MissingLambda;
+                };
+                try w.print(
+                    \\    const L = struct {{
+                    \\        var calls: usize = 0;
+                    \\        fn reset() void {{
+                    \\            calls = 0;
+                    \\        }}
+                    \\        fn f(text: []const u8, out: *std.Io.Writer) std.Io.Writer.Error!void {{
+                    \\            {s}
+                    \\        }}
+                    \\    }};
+                    \\
+                , .{body});
+            }
             try w.writeAll("    const data = ");
             try writeLiteral(w, t.data);
             try w.writeAll(";\n    const partials = ");
             try writeLiteral(w, t.partials orelse .{ .object = .empty });
+            try w.writeAll(if (lambda) ";\n    try checkReset(L.reset, " else ";\n    try check(");
             try w.print(
-                \\;
-                \\    try check("{f}", data, partials, "{f}");
+                \\"{f}", data, partials, "{f}");
                 \\}}
                 \\
                 \\

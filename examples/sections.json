@@ -1,0 +1,11 @@
+{
+  "store": "Main Street",
+  "items": [
+    { "name": "Apple", "price": 3, "sale": true },
+    { "name": "Bread", "price": 5, "sale": false },
+    { "name": "Milk",  "price": 2 }
+  ],
+  "empty": [],
+  "tags": ["a", "b", "c"],
+  "owner": { "first": "Ada", "last": "Lovelace" }
+}

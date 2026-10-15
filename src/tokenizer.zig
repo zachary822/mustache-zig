@@ -143,6 +143,7 @@ pub const Tokenizer = struct {
             }
             self.open = new_open;
             self.close = new_close;
+            self.delims = value;
         }
 
         return .{ .kind = kind, .value = value, .start = start, .end = end };

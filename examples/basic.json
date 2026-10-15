@@ -1,0 +1,8 @@
+{
+  "name": "World",
+  "html": "<b>\"Tom\" & 'Jerry'</b>",
+  "count": 42,
+  "ratio": 1.5,
+  "flag": true,
+  "user": { "address": { "city": "Oslo" } }
+}
