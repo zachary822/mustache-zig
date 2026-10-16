@@ -21,7 +21,9 @@ pub fn Comptime(comptime src: []const u8, comptime partials: anytype) type {
             const D = ComptimeRuntime(@TypeOf(data));
             const ptr: *const D = if (D != @TypeOf(data)) comptimePtr(data) else &data;
             const root: Frame(D, void) = .{ .v = ptr, .up = {} };
-            const c: Ctx = .{ .gpa = gpa, .w = w, .partials = value.fromComptime(partials) };
+            var cache: dynamic.Cache = .init(gpa, null);
+            defer cache.deinit();
+            const c: Ctx = .{ .gpa = gpa, .w = w, .partials = value.fromComptime(partials), .cache = &cache };
             try renderNodes(nodes, partials, 0, nodes.len, &.{}, null, &root, &c);
         }
 
@@ -38,6 +40,7 @@ const Ctx = struct {
     gpa: Allocator,
     w: *Writer,
     partials: Value,
+    cache: *dynamic.Cache,
 };
 
 fn Frame(comptime T: type, comptime Up: type) type {
@@ -169,7 +172,7 @@ fn renderContent(
 }
 
 fn runtimeRenderer(c: *const Ctx, frame: anytype, comptime blocks: ?*const BlockFrame) Error!dynamic.Renderer {
-    var r: dynamic.Renderer = .init(c.gpa, c.w, c.partials);
+    var r: dynamic.Renderer = .init(c.gpa, c.w, c.partials, c.cache);
     errdefer r.deinit();
     try pushFrames(&r, frame);
     r.blocks = blocks;

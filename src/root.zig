@@ -2,13 +2,17 @@
 const std = @import("std");
 const value = @import("value.zig");
 const parser = @import("parser.zig");
-const Renderer = @import("render.zig").Renderer;
+const dynamic = @import("render.zig");
 const static = @import("static.zig");
+const library = @import("library.zig");
+const Renderer = dynamic.Renderer;
+const Cache = dynamic.Cache;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Writer = Io.Writer;
 
 pub const Comptime = static.Comptime;
+pub const Library = library.Library;
 
 pub const Node = parser.Node;
 pub const Value = value.Value;
@@ -33,7 +37,9 @@ pub const Template = struct {
     pub fn renderPartials(self: Template, gpa: Allocator, data: anytype, partials: anytype, w: *Writer) Error!void {
         const pv = if (comptime comptimeOnly(@TypeOf(partials))) value.fromComptime(partials) else toValue(&partials);
         const dv = if (comptime comptimeOnly(@TypeOf(data))) value.fromComptime(data) else toValue(&data);
-        var r: Renderer = .init(gpa, w, pv);
+        var cache: Cache = .init(gpa, null);
+        defer cache.deinit();
+        var r: Renderer = .init(gpa, w, pv, &cache);
         defer r.deinit();
         try r.push(dv);
         try r.render(self.nodes);
@@ -84,4 +90,6 @@ test {
     _ = @import("escape.zig");
     _ = value;
     _ = static;
+    _ = dynamic;
+    _ = library;
 }
