@@ -58,7 +58,7 @@ pub const Renderer = struct {
     const KeyContext = struct {
         pub fn hash(_: KeyContext, k: Key) u64 {
             const a: u64 = @intFromPtr(k.src.ptr) ^ (k.src.len << 48);
-            const b: u64 = k.indent.len | (k.indent.len << 32);
+            const b: u64 = k.dedent.len | (k.indent.len << 32);
             return std.hash.int(a ^ std.hash.int(b));
         }
 
