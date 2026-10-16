@@ -31,7 +31,7 @@ pub const Block = struct {
     uniform: bool = true,
 
     pub fn fits(self: Block, to: []const u8) bool {
-        return self.uniform and std.mem.eql(u8, self.indent, to);
+        return self.uniform and std.mem.eql(u8, self.dedent, to);
     }
 };
 
@@ -143,7 +143,6 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
                         var b: Block = .{ .name = open.tok.value, .end = n, .raw = src[open.body..body_end], .delims = open.delims };
                         if (open.kind == .arg) {
                             if (open.tok.line_after != null) b.dedent = leadingBlanks(b.raw);
-                            b.indent = b.dedent;
                         } else if (open.tok.standalone and b.raw.len > 0) {
                             b.dedent = leadingBlanks(b.raw);
                             b.indent = b.dedent;
