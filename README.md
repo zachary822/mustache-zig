@@ -4,7 +4,8 @@ A [Mustache](https://mustache.github.io/) template engine for Zig.
 
 - Render templates at runtime, or parse them at compile time.
 - Use plain Zig structs, slices, optionals, hash maps and `std.json.Value` as data.
-- Supports variables, sections, inverted sections, comments, partials, set delimiters and lambdas.
+- Supports variables, sections, inverted sections, comments, partials, set delimiters, lambdas,
+  template inheritance and dynamic names.
 - Tested against the official [Mustache spec](https://github.com/mustache/spec).
 
 Requires Zig 0.17.0 or later.
@@ -75,6 +76,29 @@ const data = .{ .bold = &bold };
 // "{{#bold}}hi{{/bold}}" renders "<b>hi</b>"
 ```
 
+### Inheritance
+
+A parent tag (`{{<name}}`) renders a partial as a parent template.
+Block tags (`{{$name}}`) in the child replace the blocks with the same name in the parent.
+A block in the parent that the child does not replace renders its default content.
+
+```zig
+const partials = .{ .layout = "<h1>{{$title}}Default{{/title}}</h1>" };
+const out = try mustache.allocRender(alloc, "{{<layout}}{{$title}}Home{{/title}}{{/layout}}", .{}, partials);
+// out == "<h1>Home</h1>"
+```
+
+### Dynamic names
+
+A `*` before a partial or parent name makes the name dynamic.
+The engine finds the partial name in the data.
+
+```zig
+const data = .{ .kind = "item" };
+const partials = .{ .item = "[item]" };
+// "{{>*kind}}" renders "[item]"
+```
+
 ## Command-line tool
 
 ```sh
@@ -102,6 +126,6 @@ The spec tests are generated from the Mustache spec by `tools/gen_spec_tests.zig
 | Spec | Status |
 |---|---|
 | Interpolation, sections, inverted, comments, partials, delimiters | Supported |
-| Lambdas | Supported (spec tests not run, they use code from other languages) |
-| Dynamic names | Not yet |
-| Inheritance | Not yet |
+| Lambdas | Supported |
+| Dynamic names | Supported |
+| Inheritance | Supported |
