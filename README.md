@@ -99,6 +99,30 @@ const partials = .{ .item = "[item]" };
 // "{{>*kind}}" renders "[item]"
 ```
 
+### Template library
+
+A `Library` keeps a set of named templates. Each template can use the others as partials.
+The library keeps a cache of parsed partials, so a render after the first does not parse again.
+Many threads can render from one library at the same time.
+
+```zig
+var lib: mustache.Library = .init(gpa, io);
+defer lib.deinit();
+
+try lib.add("row", "<li>{{.}}</li>\n");
+try lib.add("page", "<ul>\n  {{#items}}\n  {{>row}}\n  {{/items}}\n</ul>\n");
+
+// Optional: parse all partials before the first render.
+try lib.warm();
+
+try lib.render(gpa, "page", .{ .items = .{ "a", "b" } }, writer);
+```
+
+- `add` returns `error.DuplicateName` if the name is in the library.
+- `addDir(io, dir)` adds each `*.mustache` file in `dir`. The name is the file name without `.mustache`.
+- `render` returns `error.UnknownTemplate` if the name is not in the library.
+- If many threads render, `gpa` must be thread-safe. The library uses `io` for its lock.
+
 ## Command-line tool
 
 ```sh
