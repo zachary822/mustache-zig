@@ -39,7 +39,7 @@ pub fn main() !void {
     const data = .{ .name = "World", .items = &[_][]const u8{ "a", "b" } };
     const partials = .{ .item = "[{{.}}]" };
 
-    const out = try mustache.allocRender(alloc, "Hello, {{name}}! {{#items}}{{>item}}{{/items}}", data, partials);
+    const out = try mustache.renderAlloc(alloc, "Hello, {{name}}! {{#items}}{{>item}}{{/items}}", data, partials);
     defer alloc.free(out);
     // out == "Hello, World! [a][b]"
 }
@@ -84,7 +84,7 @@ A block in the parent that the child does not replace renders its default conten
 
 ```zig
 const partials = .{ .layout = "<h1>{{$title}}Default{{/title}}</h1>" };
-const out = try mustache.allocRender(alloc, "{{<layout}}{{$title}}Home{{/title}}{{/layout}}", .{}, partials);
+const out = try mustache.renderAlloc(alloc, "{{<layout}}{{$title}}Home{{/title}}{{/layout}}", .{}, partials);
 // out == "<h1>Home</h1>"
 ```
 

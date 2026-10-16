@@ -118,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
         \\fn checkReset(comptime reset: fn () void, comptime template: []const u8, data: anytype, comptime partials: anytype, expected: []const u8) !void {
         \\    const gpa = std.testing.allocator;
         \\    reset();
-        \\    const got = try mustache.allocRender(gpa, template, data, partials);
+        \\    const got = try mustache.renderAlloc(gpa, template, data, partials);
         \\    defer gpa.free(got);
         \\    try std.testing.expectEqualStrings(expected, got);
         \\

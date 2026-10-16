@@ -1,6 +1,6 @@
 .{
     .name = .mustache_zig,
-    .version = "0.1.0",
+    .version = "0.2.0",
     // Changing this has security and trust implications. Regenerate it only for a hostile fork.
     .fingerprint = 0x4ce7ac4af91a8d0b,
     .minimum_zig_version = "0.17.0",

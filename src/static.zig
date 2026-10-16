@@ -339,7 +339,7 @@ fn writeTyped(c: *const Ctx, frame: anytype, p: anytype, escape: bool, comptime 
                 else => try writeTyped(c, frame, p.*, escape, blocks),
             },
             .slice => if (info.child == u8) try writeStr(w, p.*, escape),
-            .many, .c => if (info.child == u8 and info.sentinel() != null) try writeStr(w, std.mem.span(p.*), escape),
+            .many, .c => @compileError("mustache: cannot read data of type " ++ @typeName(T)),
         },
         .@"union" => switch (p.*) {
             inline else => |*x| try writeTyped(c, frame, x, escape, blocks),
@@ -415,7 +415,7 @@ fn SectionK(
                         else => try self.section(p.*),
                     },
                     .slice => if (info.child == u8) try self.pushBody(p) else for (p.*) |*item| try self.pushBody(item),
-                    .many, .c => try self.pushBody(p),
+                    .many, .c => @compileError("mustache: cannot read data of type " ++ @typeName(T)),
                 },
                 .@"struct" => |info| {
                     if (info.is_tuple) {
@@ -457,7 +457,7 @@ fn truthy(p: anytype) bool {
                 else => truthy(p.*),
             },
             .slice => info.child == u8 or p.len > 0,
-            else => true,
+            .many, .c => @compileError("mustache: cannot read data of type " ++ @typeName(T)),
         },
         .@"struct" => |info| if (info.is_tuple) info.field_names.len > 0 else if (comptime value.isArrayList(T)) p.items.len > 0 else true,
         .@"union" => switch (p.*) {

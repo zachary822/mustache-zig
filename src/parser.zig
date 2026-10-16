@@ -35,7 +35,8 @@ pub const Block = struct {
     }
 };
 
-pub const max_depth = 64;
+/// The maximum nesting of section and block tags in one template.
+pub const max_nesting = 64;
 
 fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Error!usize {
     const Text = struct { node: u32, text: []const u8 };
@@ -47,7 +48,7 @@ fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Err
         delims: []const u8,
         before: ?Text,
     };
-    var stack: [max_depth]Open = undefined;
+    var stack: [max_nesting]Open = undefined;
     var depth: usize = 0;
 
     var n: u32 = 0;
@@ -73,7 +74,7 @@ fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Err
                 n += 1;
             },
             .section, .inverted, .parent, .block => {
-                if (depth == max_depth) return error.TooDeep;
+                if (depth == max_nesting) return error.TooDeep;
                 const open: Open = .{
                     .kind = if (tok.kind == .block)
                         (if (in_parent) .arg else .site)

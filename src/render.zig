@@ -130,6 +130,107 @@ const DynMemo = struct {
     nodes: []const Node = &.{},
 };
 
+fn partialSource(partials: Value, name: []const u8) ?[]const u8 {
+    return switch (partials) {
+        .map => |m| switch (m.get(name) orelse return null) {
+            .string => |s| s,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+/// Parses into `cache` all partials that a render of the templates can use.
+/// It renders nothing.
+pub const Warmer = struct {
+    gpa: Allocator,
+    partials: Value,
+    cache: *Cache,
+    names: []const []const u8,
+
+    blocks: ?*const BlockFrame = null,
+    nest: usize = 0,
+    partial_depth: usize = 0,
+    budget: usize = 1_000_000,
+    seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
+
+    /// `names` are the partial names to try for a dynamic name.
+    pub fn init(gpa: Allocator, partials: Value, cache: *Cache, names: []const []const u8) Warmer {
+        return .{ .gpa = gpa, .partials = partials, .cache = cache, .names = names };
+    }
+
+    pub fn deinit(self: *Warmer) void {
+        self.seen.deinit(self.gpa);
+    }
+
+    pub fn warm(self: *Warmer, nodes: []const Node) Error!void {
+        return self.warmRange(nodes, 0, nodes.len);
+    }
+
+    fn warmRange(self: *Warmer, nodes: []const Node, from: usize, to: usize) Error!void {
+        if (self.nest == max_depth) return;
+        self.nest += 1;
+        defer self.nest -= 1;
+
+        var i = from;
+        while (i < to) {
+            if (self.budget == 0) return;
+            self.budget -= 1;
+            switch (nodes[i]) {
+                .text, .variable, .section => {},
+                .partial => |p| try self.warmPartial(p.name, p.dynamic, p.indent, null),
+                .parent => |p| {
+                    const frame: BlockFrame = .{ .nodes = nodes, .from = @intCast(i + 1), .to = p.end, .up = self.blocks };
+                    try self.warmPartial(p.name, p.dynamic, p.indent, &frame);
+                    i = p.end;
+                    continue;
+                },
+                .block => |b| {
+                    if (findOverride(self.blocks, b.name)) |o| {
+                        const saved = self.blocks;
+                        self.blocks = o.frame.up;
+                        defer self.blocks = saved;
+                        try self.warmContent(o.frame.nodes, o.index, o.frame.nodes[o.index].block, b.indent);
+                    } else {
+                        try self.warmContent(nodes, @intCast(i), b, b.indent);
+                    }
+                    i = b.end;
+                    continue;
+                },
+            }
+            i += 1;
+        }
+    }
+
+    fn warmContent(self: *Warmer, nodes: []const Node, i: u32, b: Block, indent: []const u8) Error!void {
+        if (b.fits(indent)) return self.warmRange(nodes, i + 1, b.end);
+        const bnodes = try self.cache.get(b.raw, b.dedent, indent, b.delims);
+        try self.warmRange(bnodes, 0, bnodes.len);
+    }
+
+    fn warmPartial(self: *Warmer, name: []const u8, dynamic: bool, indent: []const u8, frame: ?*const BlockFrame) Error!void {
+        if (self.partial_depth == max_warm_depth) return;
+        if (!dynamic) return self.warmOne(name, indent, frame);
+        for (self.names) |n| try self.warmOne(n, indent, frame);
+    }
+
+    fn warmOne(self: *Warmer, name: []const u8, indent: []const u8, frame: ?*const BlockFrame) Error!void {
+        const src = partialSource(self.partials, name) orelse return;
+        const nodes = try self.cache.get(src, "", indent, "");
+        if (frame == null and self.blocks == null) {
+            const gop = try self.seen.getOrPut(self.gpa, @intFromPtr(nodes.ptr));
+            if (gop.found_existing) return;
+        }
+
+        self.partial_depth += 1;
+        defer self.partial_depth -= 1;
+        const saved = self.blocks;
+        if (frame) |f| self.blocks = f;
+        defer self.blocks = saved;
+        try self.warmRange(nodes, 0, nodes.len);
+    }
+};
+
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
     w: *Writer,
@@ -138,7 +239,6 @@ pub const Renderer = struct {
     stack: [max_stack]Value = undefined,
     depth: usize = 0,
     nest: usize = 0,
-    partial_depth: usize = 0,
     blocks: ?*const BlockFrame = null,
 
     cache: *Cache,
@@ -151,16 +251,12 @@ pub const Renderer = struct {
     dyn_memo: [8]DynMemo = @splat(.{}),
     dyn_next: usize = 0,
 
-    warm_budget: usize = 1_000_000,
-    warm_seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
-
     pub fn init(gpa: Allocator, w: *Writer, partials: Value, cache: *Cache) Renderer {
         return .{ .gpa = gpa, .w = w, .partials = partials, .cache = cache };
     }
 
     pub fn deinit(self: *Renderer) void {
         for (self.scratch[0..self.scratch_used]) |*sc| sc.arena.deinit();
-        self.warm_seen.deinit(self.gpa);
     }
 
     pub fn push(self: *Renderer, v: Value) Error!void {
@@ -331,73 +427,6 @@ pub const Renderer = struct {
         return gop.value_ptr.*;
     }
 
-    pub fn warm(self: *Renderer, nodes: []const Node, names: []const []const u8) Error!void {
-        return self.warmRange(nodes, 0, nodes.len, names);
-    }
-
-    fn warmRange(self: *Renderer, nodes: []const Node, from: usize, to: usize, names: []const []const u8) Error!void {
-        if (self.nest == max_depth) return;
-        self.nest += 1;
-        defer self.nest -= 1;
-
-        var i = from;
-        while (i < to) {
-            if (self.warm_budget == 0) return;
-            self.warm_budget -= 1;
-            switch (nodes[i]) {
-                .text, .variable, .section => {},
-                .partial => |p| try self.warmPartial(p.name, p.dynamic, p.indent, null, names),
-                .parent => |p| {
-                    const frame: BlockFrame = .{ .nodes = nodes, .from = @intCast(i + 1), .to = p.end, .up = self.blocks };
-                    try self.warmPartial(p.name, p.dynamic, p.indent, &frame, names);
-                    i = p.end;
-                    continue;
-                },
-                .block => |b| {
-                    if (findOverride(self.blocks, b.name)) |o| {
-                        const saved = self.blocks;
-                        self.blocks = o.frame.up;
-                        defer self.blocks = saved;
-                        try self.warmContent(o.frame.nodes, o.index, o.frame.nodes[o.index].block, b.indent, names);
-                    } else {
-                        try self.warmContent(nodes, @intCast(i), b, b.indent, names);
-                    }
-                    i = b.end;
-                    continue;
-                },
-            }
-            i += 1;
-        }
-    }
-
-    fn warmContent(self: *Renderer, nodes: []const Node, i: u32, b: Block, indent: []const u8, names: []const []const u8) Error!void {
-        if (b.fits(indent)) return self.warmRange(nodes, i + 1, b.end, names);
-        const bnodes = try self.cache.get(b.raw, b.dedent, indent, b.delims);
-        try self.warmRange(bnodes, 0, bnodes.len, names);
-    }
-
-    fn warmPartial(self: *Renderer, name: []const u8, dynamic: bool, indent: []const u8, frame: ?*const BlockFrame, names: []const []const u8) Error!void {
-        if (self.partial_depth == max_warm_depth) return;
-        if (!dynamic) return self.warmOne(name, indent, frame, names);
-        for (names) |n| try self.warmOne(n, indent, frame, names);
-    }
-
-    fn warmOne(self: *Renderer, name: []const u8, indent: []const u8, frame: ?*const BlockFrame, names: []const []const u8) Error!void {
-        const src = self.partialSource(name) orelse return;
-        const nodes = try self.cache.get(src, "", indent, "");
-        if (frame == null and self.blocks == null) {
-            const gop = try self.warm_seen.getOrPut(self.gpa, @intFromPtr(nodes.ptr));
-            if (gop.found_existing) return;
-        }
-
-        self.partial_depth += 1;
-        defer self.partial_depth -= 1;
-        const saved = self.blocks;
-        if (frame) |f| self.blocks = f;
-        defer self.blocks = saved;
-        try self.warmRange(nodes, 0, nodes.len, names);
-    }
-
     fn renderPartial(self: *Renderer, name: []const u8, dynamic: bool, indent: []const u8, frame: ?*const BlockFrame) Error!void {
         const nodes = try self.partialNodes(name, dynamic, indent) orelse return;
         const saved = self.blocks;
@@ -415,7 +444,7 @@ pub const Renderer = struct {
         const real_name = if (dynamic) (try self.resolveName(name, &buf) orelse return null) else name;
         if (use_memo and dynamic) if (self.findDynMemo(real_name, indent)) |nodes| return nodes;
 
-        const src = self.partialSource(real_name) orelse return null;
+        const src = partialSource(self.partials, real_name) orelse return null;
         const nodes = try self.cache.get(src, "", indent, "");
         if (use_memo and !dynamic) slot.* = .{ .name = name, .indent = indent, .nodes = nodes };
         if (use_memo and dynamic) self.putDynMemo(real_name, indent, nodes);
@@ -437,16 +466,6 @@ pub const Renderer = struct {
         m.len = name.len;
         m.indent = indent;
         m.nodes = nodes;
-    }
-
-    fn partialSource(self: *Renderer, name: []const u8) ?[]const u8 {
-        return switch (self.partials) {
-            .map => |m| switch (m.get(name) orelse return null) {
-                .string => |s| s,
-                else => null,
-            },
-            else => null,
-        };
     }
 
     fn resolveName(self: *Renderer, name: []const u8, buf: []u8) Error!?[]const u8 {

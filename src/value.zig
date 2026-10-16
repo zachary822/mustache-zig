@@ -45,15 +45,6 @@ pub const Value = union(enum) {
 pub const Lambda = struct {
     ctx: ?*const anyopaque = null,
     func: *const fn (ctx: ?*const anyopaque, text: []const u8, out: *Io.Writer) Io.Writer.Error!void,
-
-    pub fn of(comptime f: fn (text: []const u8, out: *Io.Writer) Io.Writer.Error!void) Lambda {
-        const S = struct {
-            fn call(_: ?*const anyopaque, text: []const u8, out: *Io.Writer) Io.Writer.Error!void {
-                return f(text, out);
-            }
-        };
-        return .{ .func = S.call };
-    }
 };
 
 pub fn from(comptime T: type, p: *const T) Value {

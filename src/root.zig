@@ -63,7 +63,7 @@ pub fn renderPartials(gpa: Allocator, src: []const u8, data: anytype, partials: 
     return t.renderPartials(gpa, data, partials, w);
 }
 
-pub fn allocRender(gpa: Allocator, src: []const u8, data: anytype, partials: anytype) Error![]u8 {
+pub fn renderAlloc(gpa: Allocator, src: []const u8, data: anytype, partials: anytype) Error![]u8 {
     const t = try Template.parse(gpa, src);
     defer t.deinit(gpa);
     return t.renderAlloc(gpa, data, partials);
@@ -85,4 +85,17 @@ test {
     _ = static;
     _ = dynamic;
     _ = library;
+}
+
+test "a block with mixed indent gets the same reindent at each parent indent" {
+    // The line " y" does not start with the dedent "  ". With the parent indent "  ",
+    // the fast path in `Block.fits` would write " y" and not "   y".
+    const gpa = std.testing.allocator;
+    const child = "{{<p}}\n{{$b}}\n  x\n y\n{{/b}}\n{{/p}}\n";
+    inline for (.{ "  ", "    " }) |ind| {
+        const partials = .{ .p = "<\n" ++ ind ++ "{{$b}}\n" ++ ind ++ "{{/b}}\n>\n" };
+        const out = try renderAlloc(gpa, child, .{}, partials);
+        defer gpa.free(out);
+        try std.testing.expectEqualStrings("<\n" ++ ind ++ "x\n" ++ ind ++ " y\n>\n", out);
+    }
 }

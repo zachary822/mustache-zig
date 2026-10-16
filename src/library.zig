@@ -43,7 +43,10 @@ pub const Library = struct {
         var it = dir.iterate();
         while (try it.next(io)) |entry| {
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ext)) continue;
-            const src = try dir.readFileAlloc(io, entry.name, self.arena.allocator(), .limited(16 << 20));
+            // `add` copies `src` into the arena.
+            const gpa = self.arena.child_allocator;
+            const src = try dir.readFileAlloc(io, entry.name, gpa, .limited(16 << 20));
+            defer gpa.free(src);
             const name = entry.name[0 .. entry.name.len - ext.len];
             self.add(name, src) catch |e| {
                 std.log.err("{s}: {t}", .{ entry.name, e });
@@ -53,11 +56,9 @@ pub const Library = struct {
     }
 
     pub fn warm(self: *Library) render_mod.Error!void {
-        const gpa = self.arena.allocator();
-        var discard: Writer.Discarding = .init(&.{});
-        var r: Renderer = .init(gpa, &discard.writer, self.partialsValue(), &self.cache);
-        defer r.deinit();
-        for (self.nodes.items) |nodes| try r.warm(nodes, self.sources.keys());
+        var w: render_mod.Warmer = .init(self.arena.allocator(), self.partialsValue(), &self.cache, self.sources.keys());
+        defer w.deinit();
+        for (self.nodes.items) |nodes| try w.warm(nodes);
     }
 
     pub fn cached(self: *Library) usize {
@@ -117,6 +118,26 @@ test "warm fills the cache before the first render" {
     try lib.warm();
     // a; b with indent "  "; c and the others for {{>*kind}} with indent "  ".
     try std.testing.expect(lib.cached() >= 3);
+}
+
+test "addDir adds each .mustache file by its name" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "page.mustache", .data = "<{{>row}}>" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "row.mustache", .data = "{{x}}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "notes.txt", .data = "{{" });
+
+    var lib: Library = .init(gpa, io);
+    defer lib.deinit();
+    try lib.addDir(io, tmp.dir);
+
+    var out: Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try lib.render(gpa, "page", .{ .x = 1 }, &out.writer);
+    try std.testing.expectEqualStrings("<1>", out.written());
+    try std.testing.expectError(error.UnknownTemplate, lib.render(gpa, "notes", .{}, &out.writer));
 }
 
 test "many threads render from one cold library" {
