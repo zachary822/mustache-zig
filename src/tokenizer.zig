@@ -9,13 +9,15 @@ pub const Kind = enum {
     close, // {{/name}}
     comment, // {{! ...}}
     partial, // {{>name}}
+    parent, // {{<name}}
+    block, // {{$name}}
     set_delimiters, // {{=<% %>=}}
 
     /// The spec lets these tags be "standalone"
     pub fn canBeStandalone(k: Kind) bool {
         return switch (k) {
-            .section, .inverted, .close, .comment, .partial, .set_delimiters => true,
-            .text, .variable, .unescaped => false,
+            .section, .inverted, .close, .comment, .partial, .block, .set_delimiters => true,
+            .text, .variable, .unescaped, .parent => false,
         };
     }
 };
@@ -27,6 +29,10 @@ pub const Token = struct {
     start: usize,
     end: usize,
     indent: []const u8 = "",
+    dynamic: bool = false,
+    line_start: ?usize = null,
+    line_after: ?usize = null,
+    standalone: bool = false,
 };
 
 pub const Error = error{ UnclosedTag, EmptyTag, BadName, BadDelimiters };
@@ -77,11 +83,14 @@ pub const Tokenizer = struct {
         var text_end = tag_start;
         self.pos = tag.end;
 
-        if (tag.kind.canBeStandalone()) {
-            if (self.standaloneLine(tag.start, tag.end)) |line| {
-                text_end = line.indent_start;
-                tag.indent = self.src[line.indent_start..tag.start];
-                self.pos = line.after;
+        if (tag.kind.canBeStandalone() or tag.kind == .parent) {
+            tag.line_start = self.clearLeft(tag.start);
+            tag.line_after = self.clearRight(tag.end);
+            if (tag.kind.canBeStandalone() and tag.line_start != null and tag.line_after != null) {
+                text_end = tag.line_start.?;
+                tag.indent = self.src[text_end..tag.start];
+                self.pos = tag.line_after.?;
+                tag.standalone = true;
             }
         }
         self.last_tag_end = tag.end;
@@ -107,6 +116,8 @@ pub const Tokenizer = struct {
             '/' => kind = .close,
             '!' => kind = .comment,
             '>' => kind = .partial,
+            '<' => kind = .parent,
+            '$' => kind = .block,
             '&' => kind = .unescaped,
             '{' => {
                 kind = .unescaped;
@@ -122,7 +133,12 @@ pub const Tokenizer = struct {
 
         const close_at = findDelim(self.src, i, close) orelse return error.UnclosedTag;
         const end = close_at + close.len;
-        const value = if (kind == .comment) self.src[i..close_at] else std.mem.trim(u8, self.src[i..close_at], " \t\r\n");
+        var value = if (kind == .comment) self.src[i..close_at] else std.mem.trim(u8, self.src[i..close_at], " \t\r\n");
+        var dynamic = false;
+        if ((kind == .partial or kind == .parent) and value.len > 0 and value[0] == '*') {
+            dynamic = true;
+            value = std.mem.trim(u8, value[1..], " \t\r\n");
+        }
         if (value.len == 0 and kind != .comment) return error.EmptyTag;
 
         if (kind != .comment and kind != .set_delimiters) {
@@ -146,25 +162,23 @@ pub const Tokenizer = struct {
             self.delims = value;
         }
 
-        return .{ .kind = kind, .value = value, .start = start, .end = end };
+        return .{ .kind = kind, .value = value, .start = start, .end = end, .dynamic = dynamic };
     }
 
-    const Line = struct { indent_start: usize, after: usize };
-
-    fn standaloneLine(self: *const Tokenizer, start: usize, end: usize) ?Line {
+    fn clearLeft(self: *const Tokenizer, start: usize) ?usize {
         var a = start;
-
         while (a > 0 and isBlank(self.src[a - 1])) a -= 1;
         if (a > 0 and self.src[a - 1] != '\n') return null;
-
         if (a < self.last_tag_end) return null;
+        return a;
+    }
 
+    fn clearRight(self: *const Tokenizer, end: usize) ?usize {
         var b = end;
         while (b < self.src.len and isBlank(self.src[b])) b += 1;
-        if (b == self.src.len) return .{ .indent_start = a, .after = b };
-        if (self.src[b] == '\n') return .{ .indent_start = a, .after = b + 1 };
-        if (self.src[b] == '\r' and b + 1 < self.src.len and self.src[b + 1] == '\n')
-            return .{ .indent_start = a, .after = b + 2 };
+        if (b == self.src.len) return b;
+        if (self.src[b] == '\n') return b + 1;
+        if (self.src[b] == '\r' and b + 1 < self.src.len and self.src[b + 1] == '\n') return b + 2;
         return null;
     }
 };
@@ -176,22 +190,14 @@ fn concat(buf: []u8, a: []const u8, b: []const u8) Error![]const u8 {
     return buf[0 .. a.len + b.len];
 }
 
-test "test tokenizer" {
-    const gpa = std.testing.allocator;
-
-    const source = "fun template {{{name  }}}";
-
-    var tokenizer: Tokenizer = .init(source);
-
-    var tokens: std.ArrayList(Token) = .empty;
-    defer tokens.deinit(gpa);
-
-    while (try tokenizer.next()) |token| {
-        try tokens.append(gpa, token);
-    }
-
-    try std.testing.expectEqualStrings("fun template ", tokens.items[0].value);
-    try std.testing.expectEqualStrings("name", tokens.items[1].value);
+test "dynamic names" {
+    var t: Tokenizer = .init("{{> * dyn }}{{<*a.b}}{{/a.b}}");
+    const p = (try t.next()).?;
+    try std.testing.expect(p.kind == .partial and p.dynamic);
+    try std.testing.expectEqualStrings("dyn", p.value);
+    const q = (try t.next()).?;
+    try std.testing.expect(q.kind == .parent and q.dynamic);
+    try std.testing.expectEqualStrings("a.b", q.value);
 }
 
 test "names with whitespace" {

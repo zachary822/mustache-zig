@@ -3,6 +3,7 @@ const parser = @import("parser.zig");
 const value = @import("value.zig");
 const escape = @import("escape.zig");
 const Allocator = std.mem.Allocator;
+const Block = parser.Block;
 const Node = parser.Node;
 const Value = value.Value;
 const Writer = std.Io.Writer;
@@ -10,7 +11,35 @@ const Writer = std.Io.Writer;
 pub const Error = Writer.Error || Allocator.Error || parser.Error || error{TooDeep};
 
 pub const max_stack = 256;
-pub const max_partial_depth = 100;
+pub const max_partial_depth = 256;
+
+pub const BlockFrame = struct {
+    nodes: []const Node,
+    from: u32,
+    to: u32,
+    up: ?*const BlockFrame,
+
+    fn find(self: *const BlockFrame, name: []const u8) ?u32 {
+        var j = self.from;
+        while (j < self.to) {
+            const arg = self.nodes[j].block;
+            if (std.mem.eql(u8, arg.name, name)) return j;
+            j = arg.end;
+        }
+        return null;
+    }
+};
+
+pub const Override = struct { frame: *const BlockFrame, index: u32 };
+
+pub fn findOverride(blocks: ?*const BlockFrame, name: []const u8) ?Override {
+    var found: ?Override = null;
+    var f = blocks;
+    while (f) |frame| : (f = frame.up) {
+        if (frame.find(name)) |j| found = .{ .frame = frame, .index = j };
+    }
+    return found;
+}
 
 pub const Renderer = struct {
     gpa: std.mem.Allocator,
@@ -19,26 +48,33 @@ pub const Renderer = struct {
     partials: ?Value = null,
     stack: [max_stack]Value = undefined,
     depth: usize = 0,
-    cache: std.AutoHashMapUnmanaged(Key, Parsed) = .empty,
+    partial_depth: usize = 0,
+    blocks: ?*const BlockFrame = null,
 
-    const Key = struct { name: [*]const u8, name_len: usize, ident: [*]const u8, ident_len: usize };
-    const Parsed = struct { name: []u8, ident: []u8, src: []u8, nodes: []Node };
+    arena: std.heap.ArenaAllocator,
+    cache: std.HashMapUnmanaged(Key, []const Node, KeyContext, 80) = .empty,
 
-    fn freeParsed(self: *Renderer, p: Parsed) void {
-        self.gpa.free(p.name);
-        self.gpa.free(p.ident);
-        self.gpa.free(p.src);
-        self.gpa.free(p.nodes);
-    }
+    const Key = struct { src: []const u8, dedent: []const u8, indent: []const u8 };
+    const KeyContext = struct {
+        pub fn hash(_: KeyContext, k: Key) u64 {
+            const a: u64 = @intFromPtr(k.src.ptr) ^ (k.src.len << 48);
+            const b: u64 = k.indent.len | (k.indent.len << 32);
+            return std.hash.int(a ^ std.hash.int(b));
+        }
+
+        pub fn eql(_: KeyContext, a: Key, b: Key) bool {
+            return a.src.ptr == b.src.ptr and a.src.len == b.src.len and
+                std.mem.eql(u8, a.dedent, b.dedent) and std.mem.eql(u8, a.indent, b.indent);
+        }
+    };
 
     pub fn init(gpa: Allocator, w: *Writer, partials: ?Value) Renderer {
-        return .{ .gpa = gpa, .w = w, .partials = partials };
+        return .{ .gpa = gpa, .w = w, .partials = partials, .arena = .init(gpa) };
     }
 
     pub fn deinit(self: *Renderer) void {
-        var it = self.cache.valueIterator();
-        while (it.next()) |p| self.freeParsed(p.*);
         self.cache.deinit(self.gpa);
+        self.arena.deinit();
     }
 
     pub fn push(self: *Renderer, v: Value) Error!void {
@@ -100,11 +136,10 @@ pub const Renderer = struct {
     }
 
     pub fn renderLambda(self: *Renderer, l: value.Lambda, text: []const u8, delims: []const u8) Error!void {
-        var out: Writer.Allocating = .init(self.gpa);
-        defer out.deinit();
+        const arena = self.arena.allocator();
+        var out: Writer.Allocating = .init(arena);
         l.func(l.ctx, text, &out.writer) catch return error.OutOfMemory;
-        const nodes = try parser.parseDelims(self.gpa, out.written(), delims);
-        defer self.gpa.free(nodes);
+        const nodes = try parser.parseDelims(arena, out.written(), delims);
         try self.render(nodes);
     }
 
@@ -118,7 +153,7 @@ pub const Renderer = struct {
         return self.renderRange(nodes, 0, nodes.len);
     }
 
-    fn renderRange(self: *Renderer, nodes: []const Node, from: usize, to: usize) Error!void {
+    pub fn renderRange(self: *Renderer, nodes: []const Node, from: usize, to: usize) Error!void {
         var i = from;
         while (i < to) {
             switch (nodes[i]) {
@@ -138,64 +173,96 @@ pub const Renderer = struct {
                     i = s.end;
                     continue;
                 },
-                .partial => |p| try self.renderPartial(p.name, p.indent),
+                .partial => |p| try self.renderPartial(p.name, p.dynamic, p.indent, null),
+                .parent => |p| {
+                    const frame: BlockFrame = .{ .nodes = nodes, .from = @intCast(i + 1), .to = p.end, .up = self.blocks };
+                    try self.renderPartial(p.name, p.dynamic, p.indent, &frame);
+                    i = p.end;
+                    continue;
+                },
+                .block => |b| {
+                    try self.renderBlock(nodes, @intCast(i), b);
+                    i = b.end;
+                    continue;
+                },
             }
             i += 1;
         }
     }
 
-    fn renderPartial(self: *Renderer, name: []const u8, indent: []const u8) Error!void {
-        const partials = self.partials orelse return;
-        const src = switch (partials) {
-            .map => |m| switch (m.get(name) orelse return) {
-                .string => |s| s,
-                else => return,
-            },
-            else => return,
-        };
-        const key: Key = .{ .name = name.ptr, .name_len = name.len, .ident = indent.ptr, .ident_len = indent.len };
-        const gop = try self.cache.getOrPut(self.gpa, key);
-        var fresh = !gop.found_existing;
-        if (!fresh and !(std.mem.eql(u8, gop.value_ptr.name, name)) and std.mem.eql(u8, gop.value_ptr.ident, indent)) {
-            self.freeParsed(gop.value_ptr.*);
-            fresh = true;
+    fn renderBlock(self: *Renderer, nodes: []const Node, i: u32, b: Block) Error!void {
+        const o = findOverride(self.blocks, b.name) orelse return self.renderContent(nodes, i, b, b.indent);
+        const saved = self.blocks;
+        self.blocks = o.frame.up;
+        defer self.blocks = saved;
+        try self.renderContent(o.frame.nodes, o.index, o.frame.nodes[o.index].block, b.indent);
+    }
+
+    fn renderContent(self: *Renderer, nodes: []const Node, i: u32, b: Block, indent: []const u8) Error!void {
+        if (b.fits(indent)) return self.renderRange(nodes, i + 1, b.end);
+        try self.render(try self.parseIndented(b.raw, b.dedent, indent, b.delims));
+    }
+
+    fn parseIndented(self: *Renderer, src: []const u8, dedent: []const u8, indent: []const u8, delims: []const u8) Error![]const Node {
+        const gop = try self.cache.getOrPut(self.gpa, .{ .src = src, .dedent = dedent, .indent = indent });
+        if (gop.found_existing) return gop.value_ptr.*;
+        errdefer self.cache.removeByPtr(gop.key_ptr);
+
+        const arena = self.arena.allocator();
+        var text = src;
+        if (dedent.len > 0 or indent.len > 0) {
+            const buf = try arena.alloc(u8, parser.reindent(null, src, dedent, indent));
+            _ = parser.reindent(buf, src, dedent, indent);
+            text = buf;
         }
-        if (fresh) {
-            errdefer self.cache.removeByPtr(gop.key_ptr);
-            const name_copy = try self.gpa.dupe(u8, name);
-            errdefer self.gpa.free(name_copy);
-            const indent_copy = try self.gpa.dupe(u8, indent);
-            errdefer self.gpa.free(indent_copy);
+        const nodes = try parser.parseDelims(arena, text, delims);
+        gop.value_ptr.* = nodes;
+        return nodes;
+    }
 
-            const indented = try indentLines(self.gpa, src, indent);
-            errdefer self.gpa.free(indented);
+    fn renderPartial(self: *Renderer, name: []const u8, dynamic: bool, indent: []const u8, frame: ?*const BlockFrame) Error!void {
+        var buf: [256]u8 = undefined;
+        const real_name = if (dynamic) (try self.resolveName(name, &buf) orelse return) else name;
+        const src = self.partialSource(real_name) orelse return;
+        const nodes = try self.parseIndented(src, "", indent, "");
 
-            gop.value_ptr.* = .{ .name = name_copy, .ident = indent_copy, .src = indented, .nodes = try parser.parse(self.gpa, indented) };
-        }
+        if (self.partial_depth == max_partial_depth) return error.TooDeep;
+        self.partial_depth += 1;
+        defer self.partial_depth -= 1;
 
-        // copy the slice: a nested partial can grow the cache and move the entry;
-        const nodes = gop.value_ptr.nodes;
-        // partial uses the same context stack
+        const saved = self.blocks;
+        if (frame) |f| self.blocks = f;
+        defer self.blocks = saved;
         try self.render(nodes);
+    }
+
+    fn partialSource(self: *Renderer, name: []const u8) ?[]const u8 {
+        const partials = self.partials orelse return null;
+        return switch (partials) {
+            .map => |m| switch (m.get(name) orelse return null) {
+                .string => |s| s,
+                else => null,
+            },
+            else => null,
+        };
+    }
+
+    fn resolveName(self: *Renderer, name: []const u8, buf: []u8) Error!?[]const u8 {
+        const v = self.lookup(name) orelse return null;
+        if (v == .string) return v.string;
+        var fixed: Writer = .fixed(buf);
+        const saved = self.w;
+        self.w = &fixed;
+        defer self.w = saved;
+        self.writeValue(v, false) catch |e| switch (e) {
+            error.WriteFailed => return null,
+            else => |err| return err,
+        };
+        return fixed.buffered();
     }
 };
 
 fn findDot(name: []const u8) ?usize {
     for (name, 0..) |c, i| if (c == '.') return i;
     return null;
-}
-
-fn indentLines(gpa: Allocator, src: []const u8, indent: []const u8) Allocator.Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(gpa);
-    try out.ensureTotalCapacity(gpa, src.len + indent.len * 4);
-    var lines = std.mem.splitScalar(u8, src, '\n');
-    var first = true;
-    while (lines.next()) |line| {
-        if (!first) try out.append(gpa, '\n');
-        if (line.len > 0) try out.appendSlice(gpa, indent);
-        try out.appendSlice(gpa, line);
-        first = false;
-    }
-    return out.toOwnedSlice(gpa);
 }

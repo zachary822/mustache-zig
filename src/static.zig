@@ -5,6 +5,7 @@ const parser = @import("parser.zig");
 const value = @import("value.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
+const BlockFrame = dynamic.BlockFrame;
 const Lambda = value.Lambda;
 const Node = parser.Node;
 const Value = value.Value;
@@ -21,7 +22,7 @@ pub fn Comptime(comptime src: []const u8, comptime partials: anytype) type {
             const ptr: *const D = if (D != @TypeOf(data)) comptimePtr(data) else &data;
             const root: Frame(D, void) = .{ .v = ptr, .up = {} };
             const c: Ctx = .{ .gpa = gpa, .w = w, .partials = value.fromComptime(partials) };
-            try renderNodes(nodes, partials, 0, nodes.len, &.{}, &root, &c);
+            try renderNodes(nodes, partials, 0, nodes.len, &.{}, null, &root, &c);
         }
 
         pub fn renderAlloc(gpa: Allocator, data: anytype) Error![]u8 {
@@ -49,6 +50,7 @@ fn renderNodes(
     comptime from: usize,
     comptime to: usize,
     comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
     frame: anytype,
     c: *const Ctx,
 ) Error!void {
@@ -58,55 +60,158 @@ fn renderNodes(
         const node = comptime nodes[i];
         switch (node) {
             .text => |t| try c.w.writeAll(t),
-            .variable => |v| try find(v.name, frame, VarK(@TypeOf(frame)){ .c = c, .frame = frame, .escape = v.escape }),
+            .variable => |v| try find(v.name, frame, VarK(@TypeOf(frame), blocks){ .c = c, .frame = frame, .escape = v.escape }),
             .section => |s| {
-                const K = SectionK(nodes, partials, i, active, @TypeOf(frame));
+                const K = SectionK(nodes, partials, i, active, blocks, @TypeOf(frame));
                 try find(s.name, frame, K{ .c = c, .frame = frame });
                 i = s.end;
                 continue;
             },
-            .partial => |p| try renderPartial(p.name, p.indent, partials, active, frame, c),
+            .partial => |p| try renderNamed(nodes, i, p.name, p.dynamic, partials, active, blocks, frame, c),
+            .parent => |p| {
+                try renderNamed(nodes, i, p.name, p.dynamic, partials, active, blocks, frame, c);
+                i = p.end;
+                continue;
+            },
+            .block => |b| {
+                try renderBlock(nodes, i, partials, active, blocks, frame, c);
+                i = b.end;
+                continue;
+            },
         }
         i += 1;
     }
 }
 
-fn renderPartial(
+fn renderNamed(
+    comptime nodes: []const Node,
+    comptime i: usize,
     comptime name: []const u8,
-    comptime indent: []const u8,
+    comptime is_dynamic: bool,
     comptime partials: anytype,
     comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
+    frame: anytype,
+    c: *const Ctx,
+) Error!void {
+    if (is_dynamic) {
+        const K = NameK(nodes, i, partials, active, blocks, @TypeOf(frame));
+        return find(name, frame, K{ .c = c, .frame = frame });
+    }
+    return renderTemplate(nodes, i, name, partials, active, blocks, frame, c);
+}
+
+fn renderTemplate(
+    comptime nodes: []const Node,
+    comptime i: usize,
+    comptime name: []const u8,
+    comptime partials: anytype,
+    comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
     frame: anytype,
     c: *const Ctx,
 ) Error!void {
     if (comptime !@hasField(@TypeOf(partials), name)) return;
-    const src = comptime indentLines(@field(partials, name), indent);
-    const pnodes = comptime parser.parseComptime(src);
     inline for (active) |a| {
         if (comptime std.mem.eql(u8, a, name)) {
-            var r: dynamic.Renderer = .init(c.gpa, c.w, c.partials);
+            var r = try runtimeRenderer(c, frame, blocks);
             defer r.deinit();
-            try pushFrames(&r, frame);
-            return r.render(pnodes);
+            return r.renderRange(nodes, i, nextIndex(nodes, i));
         }
     }
-    try renderNodes(pnodes, partials, 0, pnodes.len, active ++ [_][]const u8{name}, frame, c);
+    const indent, const inner: ?*const BlockFrame = comptime switch (nodes[i]) {
+        .partial => |p| .{ p.indent, blocks },
+        .parent => |p| .{ p.indent, &BlockFrame{ .nodes = nodes, .from = i + 1, .to = p.end, .up = blocks } },
+        else => unreachable,
+    };
+    const src = comptime parser.redindentComptime(@field(partials, name), "", indent);
+    const pnodes = comptime parser.parseComptime(src);
+    try renderNodes(pnodes, partials, 0, pnodes.len, active ++ [_][]const u8{name}, inner, frame, c);
 }
 
-fn indentLines(comptime src: []const u8, comptime indent: []const u8) []const u8 {
-    if (indent.len == 0) return src;
-    comptime {
-        var out: []const u8 = "";
-        var lines = std.mem.splitScalar(u8, src, '\n');
-        var first = true;
-        while (lines.next()) |line| {
-            if (!first) out = out ++ "\n";
-            if (line.len > 0) out = out ++ indent;
-            out = out ++ line;
-            first = false;
-        }
-        return out;
+fn nextIndex(comptime nodes: []const Node, comptime i: usize) usize {
+    return switch (nodes[i]) {
+        .parent => |p| p.end,
+        else => i + 1,
+    };
+}
+
+fn renderBlock(
+    comptime nodes: []const Node,
+    comptime i: usize,
+    comptime partials: anytype,
+    comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
+    frame: anytype,
+    c: *const Ctx,
+) Error!void {
+    const b = comptime nodes[i].block;
+    if (comptime dynamic.findOverride(blocks, b.name)) |o| {
+        return renderContent(o.frame.nodes, o.index, b.indent, partials, active, o.frame.up, frame, c);
     }
+    return renderContent(nodes, i, b.indent, partials, active, blocks, frame, c);
+}
+
+fn renderContent(
+    comptime nodes: []const Node,
+    comptime i: usize,
+    comptime indent: []const u8,
+    comptime partials: anytype,
+    comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
+    frame: anytype,
+    c: *const Ctx,
+) Error!void {
+    const b = comptime nodes[i].block;
+    if (comptime b.fits(indent)) return renderNodes(nodes, partials, i + 1, b.end, active, blocks, frame, c);
+    const bnodes = comptime parser.parseComptimeDelims(parser.redindentComptime(b.raw, b.dedent, indent), b.delims);
+    return renderNodes(bnodes, partials, 0, bnodes.len, active, blocks, frame, c);
+}
+
+fn runtimeRenderer(c: *const Ctx, frame: anytype, comptime blocks: ?*const BlockFrame) Error!dynamic.Renderer {
+    var r: dynamic.Renderer = .init(c.gpa, c.w, c.partials);
+    errdefer r.deinit();
+    try pushFrames(&r, frame);
+    r.blocks = blocks;
+    return r;
+}
+
+fn partialNames(comptime partials: anytype) []const []const u8 {
+    return switch (@typeInfo(@TypeOf(partials))) {
+        .@"struct" => |info| info.field_names,
+        else => &.{},
+    };
+}
+
+fn NameK(
+    comptime nodes: []const Node,
+    comptime i: usize,
+    comptime partials: anytype,
+    comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
+    comptime F: type,
+) type {
+    return struct {
+        c: *const Ctx,
+        frame: F,
+
+        pub fn found(self: @This(), p: anytype) Error!void {
+            var buf: [256]u8 = undefined;
+            var fixed: Writer = .fixed(&buf);
+            var c = self.c.*;
+            c.w = &fixed;
+            writeTyped(&c, self.frame, p, false, blocks) catch |e| switch (e) {
+                error.WriteFailed => return,
+                else => |err| return err,
+            };
+            const name = fixed.buffered();
+            inline for (comptime partialNames(partials)) |pname| {
+                if (std.mem.eql(u8, name, pname)) return renderTemplate(nodes, i, pname, partials, active, blocks, self.frame, self.c);
+            }
+        }
+
+        pub fn missing(_: @This()) Error!void {}
+    };
 }
 
 fn pushFrames(r: *dynamic.Renderer, frame: anytype) Error!void {
@@ -214,25 +319,24 @@ fn ComptimeRuntime(comptime V: type) type {
     };
 }
 
-fn VarK(comptime F: type) type {
+fn VarK(comptime F: type, comptime blocks: ?*const BlockFrame) type {
     return struct {
         c: *const Ctx,
         frame: F,
         escape: bool,
         pub fn found(self: @This(), p: anytype) Error!void {
-            return writeTyped(self.c, self.frame, p, self.escape);
+            return writeTyped(self.c, self.frame, p, self.escape, blocks);
         }
         pub fn missing(_: @This()) Error!void {}
     };
 }
 
-fn writeTyped(c: *const Ctx, frame: anytype, p: anytype, escape: bool) Error!void {
+fn writeTyped(c: *const Ctx, frame: anytype, p: anytype, escape: bool, comptime blocks: ?*const BlockFrame) Error!void {
     const T = @TypeOf(p.*);
     const w = c.w;
     if (T == Lambda or (T == Value and p.* == .lambda)) {
-        var r: dynamic.Renderer = .init(c.gpa, w, c.partials);
+        var r = try runtimeRenderer(c, frame, blocks);
         defer r.deinit();
-        try pushFrames(&r, frame);
         try r.push(value.from(T, p));
         return r.render(&[_]Node{.{ .variable = .{ .name = ".", .escape = escape } }});
     }
@@ -246,22 +350,22 @@ fn writeTyped(c: *const Ctx, frame: anytype, p: anytype, escape: bool) Error!voi
         .bool => try w.writeAll(if (p.*) "true" else "false"),
         inline .int, .float => try w.print("{d}", .{p.*}),
         .@"enum" => try writeStr(w, @tagName(p.*), escape),
-        .optional => if (p.*) |*x| try writeTyped(c, frame, x, escape),
+        .optional => if (p.*) |*x| try writeTyped(c, frame, x, escape, blocks),
         .array => |info| if (info.child == u8) try writeStr(w, p, escape),
         .pointer => |info| switch (info.size) {
             .one => switch (@typeInfo(info.child)) {
                 .array => |arr| if (arr.child == u8) try writeStr(w, p.*, escape),
                 .@"fn" => {
                     const v = value.from(T, p);
-                    return writeTyped(c, frame, &v, escape);
+                    return writeTyped(c, frame, &v, escape, blocks);
                 },
-                else => try writeTyped(c, frame, p.*, escape),
+                else => try writeTyped(c, frame, p.*, escape, blocks),
             },
             .slice => if (info.child == u8) try writeStr(w, p.*, escape),
             .many, .c => if (info.child == u8 and info.sentinel() != null) try writeStr(w, std.mem.span(p.*), escape),
         },
         .@"union" => switch (p.*) {
-            inline else => |*x| try writeTyped(c, frame, x, escape),
+            inline else => |*x| try writeTyped(c, frame, x, escape, blocks),
         },
         else => {},
     }
@@ -277,6 +381,7 @@ fn SectionK(
     comptime partials: anytype,
     comptime index: usize,
     comptime active: []const []const u8,
+    comptime blocks: ?*const BlockFrame,
     comptime F: type,
 ) type {
     const s = nodes[index].section;
@@ -300,7 +405,7 @@ fn SectionK(
         }
 
         fn body(self: Self, frame: anytype) Error!void {
-            return renderNodes(nodes, partials, body_from, body_to, active, frame, self.c);
+            return renderNodes(nodes, partials, body_from, body_to, active, blocks, frame, self.c);
         }
 
         fn pushBody(self: Self, p: anytype) Error!void {
@@ -352,9 +457,8 @@ fn SectionK(
         }
 
         fn lambda(self: Self, l: Lambda) Error!void {
-            var r: dynamic.Renderer = .init(self.c.gpa, self.c.w, self.c.partials);
+            var r = try runtimeRenderer(self.c, self.frame, blocks);
             defer r.deinit();
-            try pushFrames(&r, self.frame);
             try r.renderLambda(l, s.raw, s.delims);
         }
     };
