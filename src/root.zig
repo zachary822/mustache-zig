@@ -17,13 +17,13 @@ pub const Library = library.Library;
 pub const Node = parser.Node;
 pub const Value = value.Value;
 pub const Lambda = value.Lambda;
-pub const Error = @import("render.zig").Error;
+pub const Error = dynamic.Error;
 
 pub const Template = struct {
     nodes: []const Node,
 
     pub fn parse(gpa: Allocator, src: []const u8) parser.Error!Template {
-        return .{ .nodes = try parser.parse(gpa, src) };
+        return .{ .nodes = try parser.parse(gpa, src, "") };
     }
 
     pub fn deinit(self: Template, gpa: Allocator) void {
@@ -31,12 +31,12 @@ pub const Template = struct {
     }
 
     pub fn render(self: Template, gpa: Allocator, data: anytype, w: *Writer) Error!void {
-        return self.renderPartials(gpa, data, no_partials, w);
+        return self.renderPartials(gpa, data, null, w);
     }
 
     pub fn renderPartials(self: Template, gpa: Allocator, data: anytype, partials: anytype, w: *Writer) Error!void {
-        const pv = if (comptime comptimeOnly(@TypeOf(partials))) value.fromComptime(partials) else toValue(&partials);
-        const dv = if (comptime comptimeOnly(@TypeOf(data))) value.fromComptime(data) else toValue(&data);
+        const pv = if (comptime isComptimeOnly(@TypeOf(partials))) value.fromComptime(partials) else toValue(&partials);
+        const dv = if (comptime isComptimeOnly(@TypeOf(data))) value.fromComptime(data) else toValue(&data);
         var cache: Cache = .init(gpa, null);
         defer cache.deinit();
         var r: Renderer = .init(gpa, w, pv, &cache);
@@ -53,10 +53,8 @@ pub const Template = struct {
     }
 };
 
-pub const no_partials: ?Value = null;
-
 pub fn render(gpa: Allocator, src: []const u8, data: anytype, w: *Writer) Error!void {
-    return renderPartials(gpa, src, data, no_partials, w);
+    return renderPartials(gpa, src, data, null, w);
 }
 
 pub fn renderPartials(gpa: Allocator, src: []const u8, data: anytype, partials: anytype, w: *Writer) Error!void {
@@ -65,23 +63,18 @@ pub fn renderPartials(gpa: Allocator, src: []const u8, data: anytype, partials: 
     return t.renderPartials(gpa, data, partials, w);
 }
 
-pub fn allocRender(gpa: std.mem.Allocator, src: []const u8, data: anytype, partials: anytype) ![]u8 {
+pub fn allocRender(gpa: Allocator, src: []const u8, data: anytype, partials: anytype) Error![]u8 {
     const t = try Template.parse(gpa, src);
     defer t.deinit(gpa);
     return t.renderAlloc(gpa, data, partials);
 }
 
 pub fn toValue(ptr: anytype) Value {
-    const T = @typeInfo(@TypeOf(ptr)).pointer.child;
-    if (T == ?Value) return ptr.* orelse .null;
-    return value.from(T, ptr);
+    return value.from(@TypeOf(ptr.*), ptr);
 }
 
-fn comptimeOnly(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .comptime_int, .comptime_float, .enum_literal, .null => true,
-        else => false,
-    };
+fn isComptimeOnly(comptime T: type) bool {
+    return value.Runtime(T) != T;
 }
 
 test {

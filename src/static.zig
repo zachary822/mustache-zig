@@ -10,15 +10,16 @@ const Lambda = value.Lambda;
 const Node = parser.Node;
 const Value = value.Value;
 const Writer = Io.Writer;
+const comptimePtr = value.comptimePtr;
 
 pub const Error = dynamic.Error;
 
 pub fn Comptime(comptime src: []const u8, comptime partials: anytype) type {
     return struct {
-        pub const nodes = parser.parseComptime(src);
+        pub const nodes = parser.parseComptime(src, "");
 
         pub fn render(gpa: Allocator, data: anytype, w: *Writer) Error!void {
-            const D = ComptimeRuntime(@TypeOf(data));
+            const D = value.Runtime(@TypeOf(data));
             const ptr: *const D = if (D != @TypeOf(data)) comptimePtr(data) else &data;
             const root: Frame(D, void) = .{ .v = ptr, .up = {} };
             var cache: dynamic.Cache = .init(gpa, null);
@@ -127,8 +128,8 @@ fn renderTemplate(
         .parent => |p| .{ p.indent, &BlockFrame{ .nodes = nodes, .from = i + 1, .to = p.end, .up = blocks } },
         else => unreachable,
     };
-    const src = comptime parser.redindentComptime(@field(partials, name), "", indent);
-    const pnodes = comptime parser.parseComptime(src);
+    const src = comptime parser.reindentComptime(@field(partials, name), "", indent);
+    const pnodes = comptime parser.parseComptime(src, "");
     try renderNodes(pnodes, partials, 0, pnodes.len, active ++ [_][]const u8{name}, inner, frame, c);
 }
 
@@ -167,7 +168,7 @@ fn renderContent(
 ) Error!void {
     const b = comptime nodes[i].block;
     if (comptime b.fits(indent)) return renderNodes(nodes, partials, i + 1, b.end, active, blocks, frame, c);
-    const bnodes = comptime parser.parseComptimeDelims(parser.redindentComptime(b.raw, b.dedent, indent), b.delims);
+    const bnodes = comptime parser.parseComptime(parser.reindentComptime(b.raw, b.dedent, indent), b.delims);
     return renderNodes(bnodes, partials, 0, bnodes.len, active, blocks, frame, c);
 }
 
@@ -243,7 +244,7 @@ fn Rest(comptime rest: []const u8, comptime K: type) type {
             const dot = comptime std.mem.findScalar(u8, rest, '.');
             const part = if (dot) |d| rest[0..d] else rest;
             const more = if (dot) |d| rest[d + 1 ..] else "";
-            return member(part, p, Rest(more, K){ .k = self.k }, Missing(K){ .k = self.k });
+            return member(part, p, Rest(more, K){ .k = self.k }, self.k);
         }
     };
 }
@@ -255,15 +256,6 @@ fn Below(comptime first: []const u8, comptime rest: []const u8, comptime F: type
         pub fn missing(self: @This()) Error!void {
             if (@FieldType(@TypeOf(self.frame.*), "up") == void) return self.k.missing();
             return findFirst(first, rest, self.frame.up, self.k);
-        }
-    };
-}
-
-fn Missing(comptime K: type) type {
-    return struct {
-        k: K,
-        pub fn missing(self: @This()) Error!void {
-            return self.k.missing();
         }
     };
 }
@@ -302,24 +294,6 @@ fn member(comptime key: []const u8, p: anytype, on_found: anytype, on_missing: a
         },
         else => return on_missing.missing(),
     }
-}
-
-fn comptimePtr(comptime v: anytype) *const ComptimeRuntime(@TypeOf(v)) {
-    const R = ComptimeRuntime(@TypeOf(v));
-    const S = struct {
-        const x: R = if (@typeInfo(@TypeOf(v)) == .enum_literal) @tagName(v) else v;
-    };
-    return &S.x;
-}
-
-fn ComptimeRuntime(comptime V: type) type {
-    return switch (@typeInfo(V)) {
-        .comptime_int => i64,
-        .comptime_float => f64,
-        .enum_literal => []const u8,
-        .null => ?u8,
-        else => V,
-    };
 }
 
 fn VarK(comptime F: type, comptime blocks: ?*const BlockFrame) type {

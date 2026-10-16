@@ -35,7 +35,7 @@ pub const Library = struct {
         errdefer _ = self.sources.pop();
         gop.key_ptr.* = try a.dupe(u8, name);
         gop.value_ptr.* = try a.dupe(u8, src);
-        try self.nodes.append(a, try parser.parse(a, gop.value_ptr.*));
+        try self.nodes.append(a, try parser.parse(a, gop.value_ptr.*, ""));
     }
 
     pub fn addDir(self: *Library, io: Io, dir: Io.Dir) !void {

@@ -20,11 +20,6 @@ const slack = vec_len + 8;
 pub fn writeEscaped(w: *Writer, s: []const u8) Writer.Error!void {
     const chunk_max = (w.buffer.len -| slack) / 6;
     if (chunk_max < 4 * vec_len) return writeEscapedRuns(w, s);
-    if (s.len < vec_len) {
-        const dst = try w.writableSliceGreedy(s.len * 6 + slack);
-        w.advance(escapeInto(dst, s));
-        return;
-    }
     var rest = s;
     while (rest.len > 0) {
         const n = @min(rest.len, chunk_max);

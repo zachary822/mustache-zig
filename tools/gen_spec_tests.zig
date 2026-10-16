@@ -3,13 +3,11 @@ const Io = std.Io;
 const json = std.json;
 
 const SpecFile = struct {
-    overview: []const u8,
     tests: []const SpecTest,
 };
 
 const SpecTest = struct {
     name: []const u8,
-    desc: []const u8,
     data: std.json.Value,
     template: []const u8,
     expected: []const u8,
@@ -82,25 +80,17 @@ const lambdas = std.StaticStringMap([]const u8).initComptime(.{
 });
 
 /// Spec files to generate tests for.
-const spec_files = blk: {
-    var files = [_][]const u8{
-        "comments.json",
-        "delimiters.json",
-        "interpolation.json",
-        "inverted.json",
-        "partials.json",
-        "sections.json",
-        "~dynamic-names.json",
-        "~inheritance.json",
-        "~lambdas.json",
-    };
-    std.mem.sort([]const u8, &files, {}, lessThan);
-    break :blk files;
+const spec_files = [_][]const u8{
+    "comments.json",
+    "delimiters.json",
+    "interpolation.json",
+    "inverted.json",
+    "partials.json",
+    "sections.json",
+    "~dynamic-names.json",
+    "~inheritance.json",
+    "~lambdas.json",
 };
-
-fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
-}
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

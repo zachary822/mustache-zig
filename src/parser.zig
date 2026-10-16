@@ -2,7 +2,7 @@ const std = @import("std");
 const tokenizer = @import("tokenizer.zig");
 const Tokenizer = tokenizer.Tokenizer;
 
-pub const Error = tokenizer.Error || error{ UnclosedSection, UnexpectedClose, MismatchedClose, TooDeep, OutOfSpace, OutOfMemory };
+pub const Error = tokenizer.Error || error{ UnclosedSection, UnexpectedClose, MismatchedClose, TooDeep, OutOfMemory };
 
 pub const Node = union(enum) {
     text: []const u8,
@@ -37,11 +37,7 @@ pub const Block = struct {
 
 pub const max_depth = 64;
 
-pub fn parseWith(src: []const u8, sink: anytype) Error!usize {
-    return parseWithDelims(src, "", sink);
-}
-
-pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Error!usize {
+fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype) Error!usize {
     const Text = struct { node: u32, text: []const u8 };
     const Open = struct {
         kind: enum { section, parent, site, arg, skip },
@@ -57,10 +53,7 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
     var n: u32 = 0;
     var last_text: ?Text = null;
     var tz: Tokenizer = .init(src);
-    const start = splitDelims(start_delims);
-    tz.open = start[0];
-    tz.close = start[1];
-    tz.delims = start_delims;
+    if (start_delims.len > 0) try tz.setDelims(start_delims);
 
     while (try tz.next()) |tok| {
         const in_parent = depth > 0 and switch (stack[depth - 1].kind) {
@@ -93,20 +86,8 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
                 };
                 stack[depth] = open;
                 depth += 1;
-                switch (open.kind) {
-                    .skip => continue,
-                    .section => try sink.append(.{
-                        .section = .{
-                            .name = tok.value,
-                            .inverted = tok.kind == .inverted,
-                            .end = 0, // set when we see the lose tag
-                            .raw = "",
-                            .delims = tz.delims,
-                        },
-                    }),
-                    .parent => try sink.append(.{ .parent = .{ .name = tok.value, .indent = "", .dynamic = tok.dynamic, .end = 0 } }),
-                    .site, .arg => try sink.append(.{ .block = .{ .name = tok.value, .end = 0, .raw = "" } }),
-                }
+                if (open.kind == .skip) continue;
+                try sink.append(undefined); // set when we see the close tag
                 n += 1;
                 if (open.kind == .arg and !tok.standalone) {
                     if (tok.line_after) |after| {
@@ -123,8 +104,7 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
                 switch (open.kind) {
                     .skip => {},
                     .section => {
-                        var node: Node = .{ .section = .{ .name = open.tok.value, .inverted = open.tok.kind == .inverted, .end = n, .raw = src[open.tok.end..tok.start], .delims = open.delims } };
-                        sink.set(open.node, &node);
+                        sink.set(open.node, .{ .section = .{ .name = open.tok.value, .inverted = open.tok.kind == .inverted, .end = n, .raw = src[open.tok.end..tok.start], .delims = open.delims } });
                     },
                     .parent => {
                         var indent: []const u8 = "";
@@ -135,8 +115,7 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
                         } else {
                             tz.pos = tok.end;
                         }
-                        var node: Node = .{ .parent = .{ .name = open.tok.value, .indent = indent, .dynamic = open.tok.dynamic, .end = n } };
-                        sink.set(open.node, &node);
+                        sink.set(open.node, .{ .parent = .{ .name = open.tok.value, .indent = indent, .dynamic = open.tok.dynamic, .end = n } });
                     },
                     .site, .arg => {
                         const body_end = if (tok.standalone) tok.line_start.? else tok.start;
@@ -151,8 +130,7 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
                             if (!open.tok.standalone) trimBefore(src, open.before, open.tok, sink);
                         }
                         b.uniform = isUniform(b.raw, b.dedent);
-                        var node: Node = .{ .block = b };
-                        sink.set(open.node, &node);
+                        sink.set(open.node, .{ .block = b });
                     },
                 }
             },
@@ -165,8 +143,7 @@ pub fn parseWithDelims(src: []const u8, start_delims: []const u8, sink: anytype)
 fn trimBefore(src: []const u8, before: anytype, open: tokenizer.Token, sink: anytype) void {
     const t = before orelse return;
     if (t.text.ptr + t.text.len != src.ptr + open.start) return;
-    var node: Node = .{ .text = t.text[0 .. t.text.len - (open.start - open.line_start.?)] };
-    sink.set(t.node, &node);
+    sink.set(t.node, .{ .text = t.text[0 .. t.text.len - (open.start - open.line_start.?)] });
 }
 
 fn leadingBlanks(s: []const u8) []const u8 {
@@ -206,7 +183,7 @@ fn put(out: ?[]u8, at: usize, s: []const u8) usize {
     return s.len;
 }
 
-pub fn redindentComptime(comptime src: []const u8, comptime dedent: []const u8, comptime indent: []const u8) []const u8 {
+pub fn reindentComptime(comptime src: []const u8, comptime dedent: []const u8, comptime indent: []const u8) []const u8 {
     comptime {
         @setEvalBranchQuota(10_000 + src.len * 50);
         var buf: [reindent(null, src, dedent, indent)]u8 = undefined;
@@ -216,29 +193,20 @@ pub fn redindentComptime(comptime src: []const u8, comptime dedent: []const u8, 
     }
 }
 
-pub fn splitDelims(d: []const u8) [2][]const u8 {
-    if (d.len == 0) return .{ "{{", "}}" };
-    var parts = std.mem.tokenizeAny(u8, d, " \t\r\n");
-    const o = parts.next() orelse "{{";
-    const c = parts.next() orelse "}}";
-    return .{ o, c };
-}
-
 const CountSink = struct {
     fn append(_: *CountSink, _: Node) Error!void {}
-    fn set(_: *CountSink, _: u32, _: *const Node) void {}
+    fn set(_: *CountSink, _: u32, _: Node) void {}
 };
 
 const SliceSink = struct {
     nodes: []Node,
     n: usize = 0,
     fn append(self: *SliceSink, nd: Node) Error!void {
-        if (self.n >= self.nodes.len) return error.OutOfSpace;
         self.nodes[self.n] = nd;
         self.n += 1;
     }
-    fn set(self: *SliceSink, i: u32, nd: *const Node) void {
-        self.nodes[i] = nd.*;
+    fn set(self: *SliceSink, i: u32, nd: Node) void {
+        self.nodes[i] = nd;
     }
 };
 
@@ -248,8 +216,8 @@ const ListSink = struct {
     fn append(self: *ListSink, nd: Node) Error!void {
         self.list.append(self.gpa, nd) catch return error.OutOfMemory;
     }
-    fn set(self: *ListSink, i: u32, nd: *const Node) void {
-        self.list.items[i] = nd.*;
+    fn set(self: *ListSink, i: u32, nd: Node) void {
+        self.list.items[i] = nd;
     }
 };
 
@@ -262,11 +230,7 @@ pub fn parseInto(src: []const u8, delims: []const u8, out: ?[]Node) Error!usize 
     return parseWithDelims(src, delims, &sink);
 }
 
-pub fn parse(gpa: std.mem.Allocator, src: []const u8) Error![]Node {
-    return parseDelims(gpa, src, "");
-}
-
-pub fn parseDelims(gpa: std.mem.Allocator, src: []const u8, start_delim: []const u8) Error![]Node {
+pub fn parse(gpa: std.mem.Allocator, src: []const u8, start_delim: []const u8) Error![]Node {
     var sink: ListSink = .{ .gpa = gpa };
     errdefer sink.list.deinit(gpa);
 
@@ -275,11 +239,7 @@ pub fn parseDelims(gpa: std.mem.Allocator, src: []const u8, start_delim: []const
     return sink.list.toOwnedSlice(gpa) catch return error.OutOfMemory;
 }
 
-pub fn parseComptime(comptime src: []const u8) []const Node {
-    return parseComptimeDelims(src, "");
-}
-
-pub fn parseComptimeDelims(comptime src: []const u8, comptime delims: []const u8) []const Node {
+pub fn parseComptime(comptime src: []const u8, comptime delims: []const u8) []const Node {
     comptime {
         @setEvalBranchQuota(10_000 + src.len * 500);
         const n = parseInto(src, delims, null) catch |e| @compileError("mustache: " ++ @errorName(e));
@@ -295,7 +255,7 @@ test "parse comptime" {
         \\ test template {{>hmm}} {{fun}}
     ;
 
-    const nodes = comptime parseComptime(src);
+    const nodes = comptime parseComptime(src, "");
     try std.testing.expectEqualStrings(nodes[0].text, " test template ");
     try std.testing.expectEqualStrings(nodes[1].partial.name, "hmm");
     try std.testing.expectEqualStrings(nodes[2].text, " ");

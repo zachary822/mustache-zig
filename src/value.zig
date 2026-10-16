@@ -117,22 +117,30 @@ pub fn from(comptime T: type, p: *const T) Value {
 }
 
 pub fn fromComptime(comptime v: anytype) Value {
-    const V = @TypeOf(v);
-    const R = switch (@typeInfo(V)) {
-        .comptime_int => if (v < 0) i64 else u64,
+    return from(Runtime(@TypeOf(v)), comptimePtr(v));
+}
+
+/// A runtime type that can hold a comptime-only value.
+pub fn Runtime(comptime V: type) type {
+    return switch (@typeInfo(V)) {
+        .comptime_int => i64,
         .comptime_float => f64,
         .enum_literal => []const u8,
+        .null => ?u8,
         else => V,
     };
+}
+
+/// A pointer to a static copy of `v`, with a runtime type.
+pub fn comptimePtr(comptime v: anytype) *const Runtime(@TypeOf(v)) {
     const S = struct {
-        const x: R = if (@typeInfo(V) == .enum_literal) @tagName(v) else v;
+        const x: Runtime(@TypeOf(v)) = if (@typeInfo(@TypeOf(v)) == .enum_literal) @tagName(v) else v;
     };
-    return from(R, &S.x);
+    return &S.x;
 }
 
 fn fnValue(comptime F: type, f: *const F) Value {
-    const L = @typeInfo(Lambda).@"struct".field_types[1];
-    if (*const F == L) return .{ .lambda = .{ .func = f } };
+    if (*const F == @FieldType(Lambda, "func")) return .{ .lambda = .{ .func = f } };
     const Plain = *const fn (text: []const u8, out: *Io.Writer) Io.Writer.Error!void;
     if (*const F == Plain) {
         const S = struct {
@@ -228,7 +236,7 @@ test "Values from Zig data" {
     const v = fromComptime(d);
 
     try std.testing.expectEqualStrings("Ann", v.map.get("name").?.string);
-    try std.testing.expectEqual(@as(u64, 3), v.map.get("n").?.uint);
+    try std.testing.expectEqual(@as(i64, 3), v.map.get("n").?.int);
     try std.testing.expectEqual(@as(usize, 2), v.map.get("xs").?.list.len);
     try std.testing.expectEqualStrings("red", v.map.get("e").?.string);
     try std.testing.expect(v.map.get("none").? == .null);

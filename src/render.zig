@@ -27,8 +27,7 @@ pub const KeyContext = struct {
     }
 
     pub fn eql(_: KeyContext, a: Key, b: Key) bool {
-        return a.src.ptr == b.src.ptr and a.src.len == b.src.len and
-            std.mem.eql(u8, a.dedent, b.dedent) and std.mem.eql(u8, a.indent, b.indent);
+        return same(a.src, b.src) and std.mem.eql(u8, a.dedent, b.dedent) and std.mem.eql(u8, a.indent, b.indent);
     }
 };
 
@@ -85,7 +84,7 @@ fn parseInto(arena: Allocator, src: []const u8, dedent: []const u8, indent: []co
         _ = parser.reindent(buf, src, dedent, indent);
         text = buf;
     }
-    return parser.parseDelims(arena, text, delims);
+    return parser.parse(arena, text, delims);
 }
 
 const Scratch = struct {
@@ -135,7 +134,7 @@ pub const Renderer = struct {
     gpa: std.mem.Allocator,
     w: *Writer,
 
-    partials: ?Value = null,
+    partials: Value = .null,
     stack: [max_stack]Value = undefined,
     depth: usize = 0,
     nest: usize = 0,
@@ -155,7 +154,7 @@ pub const Renderer = struct {
     warm_budget: usize = 1_000_000,
     warm_seen: std.AutoHashMapUnmanaged(usize, void) = .empty,
 
-    pub fn init(gpa: Allocator, w: *Writer, partials: ?Value, cache: *Cache) Renderer {
+    pub fn init(gpa: Allocator, w: *Writer, partials: Value, cache: *Cache) Renderer {
         return .{ .gpa = gpa, .w = w, .partials = partials, .cache = cache };
     }
 
@@ -216,8 +215,7 @@ pub const Renderer = struct {
                 self.w = &rendered.writer;
                 defer self.w = saved;
                 try self.renderLambda(l, "", "");
-                self.w = saved;
-                if (escaped) try escape.writeEscaped(self.w, rendered.written()) else try self.w.writeAll(rendered.written());
+                if (escaped) try escape.writeEscaped(saved, rendered.written()) else try saved.writeAll(rendered.written());
             },
         }
     }
@@ -241,7 +239,7 @@ pub const Renderer = struct {
         const arena = sc.arena.allocator();
         var out: Writer.Allocating = .init(arena);
         l.func(l.ctx, text, &out.writer) catch return error.OutOfMemory;
-        const nodes = try parser.parseDelims(arena, out.written(), delims);
+        const nodes = try parser.parse(arena, out.written(), delims);
         try self.render(nodes);
     }
 
@@ -318,19 +316,18 @@ pub const Renderer = struct {
 
     fn renderContent(self: *Renderer, nodes: []const Node, i: u32, b: Block, indent: []const u8) Error!void {
         if (b.fits(indent)) return self.renderRange(nodes, i + 1, b.end);
-        const stable = self.current == null;
-        try self.render(try self.parseIndented(b.raw, b.dedent, indent, b.delims, stable));
+        try self.render(try self.blockNodes(b, indent));
     }
 
-    fn parseIndented(self: *Renderer, src: []const u8, dedent: []const u8, indent: []const u8, delims: []const u8, stable: bool) Error![]const Node {
-        if (stable or self.current == null) return self.cache.get(src, dedent, indent, delims);
-
-        const sc = self.current.?;
+    /// Inside a lambda the block text can be lambda output, which lives only
+    /// as long as the lambda's scratch arena. So it goes in the scratch cache.
+    fn blockNodes(self: *Renderer, b: Block, indent: []const u8) Error![]const Node {
+        const sc = self.current orelse return self.cache.get(b.raw, b.dedent, indent, b.delims);
         const arena = sc.arena.allocator();
-        const gop = try sc.cache.getOrPut(arena, .{ .src = src, .dedent = dedent, .indent = indent });
+        const gop = try sc.cache.getOrPut(arena, .{ .src = b.raw, .dedent = b.dedent, .indent = indent });
         if (gop.found_existing) return gop.value_ptr.*;
         errdefer sc.cache.removeByPtr(gop.key_ptr);
-        gop.value_ptr.* = try parseInto(arena, src, dedent, indent, delims);
+        gop.value_ptr.* = try parseInto(arena, b.raw, b.dedent, indent, b.delims);
         return gop.value_ptr.*;
     }
 
@@ -375,7 +372,7 @@ pub const Renderer = struct {
 
     fn warmContent(self: *Renderer, nodes: []const Node, i: u32, b: Block, indent: []const u8, names: []const []const u8) Error!void {
         if (b.fits(indent)) return self.warmRange(nodes, i + 1, b.end, names);
-        const bnodes = try self.parseIndented(b.raw, b.dedent, indent, b.delims, true);
+        const bnodes = try self.cache.get(b.raw, b.dedent, indent, b.delims);
         try self.warmRange(bnodes, 0, bnodes.len, names);
     }
 
@@ -387,7 +384,7 @@ pub const Renderer = struct {
 
     fn warmOne(self: *Renderer, name: []const u8, indent: []const u8, frame: ?*const BlockFrame, names: []const []const u8) Error!void {
         const src = self.partialSource(name) orelse return;
-        const nodes = try self.parseIndented(src, "", indent, "", true);
+        const nodes = try self.cache.get(src, "", indent, "");
         if (frame == null and self.blocks == null) {
             const gop = try self.warm_seen.getOrPut(self.gpa, @intFromPtr(nodes.ptr));
             if (gop.found_existing) return;
@@ -412,15 +409,14 @@ pub const Renderer = struct {
     fn partialNodes(self: *Renderer, name: []const u8, dynamic: bool, indent: []const u8) Error!?[]const Node {
         const use_memo = self.current == null;
         const slot = &self.memo[(@intFromPtr(name.ptr) >> 3) % self.memo.len];
-        if (use_memo and !dynamic and slot.name.ptr == name.ptr and slot.name.len == name.len and
-            slot.indent.ptr == indent.ptr and slot.indent.len == indent.len) return slot.nodes;
+        if (use_memo and !dynamic and same(slot.name, name) and same(slot.indent, indent)) return slot.nodes;
 
         var buf: [256]u8 = undefined;
         const real_name = if (dynamic) (try self.resolveName(name, &buf) orelse return null) else name;
         if (use_memo and dynamic) if (self.findDynMemo(real_name, indent)) |nodes| return nodes;
 
         const src = self.partialSource(real_name) orelse return null;
-        const nodes = try self.parseIndented(src, "", indent, "", true);
+        const nodes = try self.cache.get(src, "", indent, "");
         if (use_memo and !dynamic) slot.* = .{ .name = name, .indent = indent, .nodes = nodes };
         if (use_memo and dynamic) self.putDynMemo(real_name, indent, nodes);
         return nodes;
@@ -428,8 +424,7 @@ pub const Renderer = struct {
 
     fn findDynMemo(self: *Renderer, name: []const u8, indent: []const u8) ?[]const Node {
         for (&self.dyn_memo) |*m| {
-            if (m.len == name.len and m.indent.ptr == indent.ptr and m.indent.len == indent.len and
-                std.mem.eql(u8, m.name[0..m.len], name)) return m.nodes;
+            if (m.len == name.len and same(m.indent, indent) and std.mem.eql(u8, m.name[0..m.len], name)) return m.nodes;
         }
         return null;
     }
@@ -445,8 +440,7 @@ pub const Renderer = struct {
     }
 
     fn partialSource(self: *Renderer, name: []const u8) ?[]const u8 {
-        const partials = self.partials orelse return null;
-        return switch (partials) {
+        return switch (self.partials) {
             .map => |m| switch (m.get(name) orelse return null) {
                 .string => |s| s,
                 else => null,
@@ -469,6 +463,11 @@ pub const Renderer = struct {
         return fixed.buffered();
     }
 };
+
+/// The same memory, not only the same bytes.
+fn same(a: []const u8, b: []const u8) bool {
+    return a.ptr == b.ptr and a.len == b.len;
+}
 
 fn findDot(name: []const u8) ?usize {
     for (name, 0..) |c, i| if (c == '.') return i;

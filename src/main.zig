@@ -12,30 +12,9 @@ pub fn main(init: std.process.Init) !u8 {
         return 2;
     }
 
-    const template = Io.Dir.cwd().readFileAlloc(io, args[1], arena, .limited(1 << 30)) catch |e| {
-        std.debug.print("{s}: {t}\n", .{ args[1], e });
-        return 1;
-    };
-    const data: std.json.Value = if (args.len > 2) blk: {
-        const src = Io.Dir.cwd().readFileAlloc(io, args[2], arena, .limited(1 << 30)) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[2], e });
-            return 1;
-        };
-        break :blk std.json.parseFromSliceLeaky(std.json.Value, arena, src, .{}) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[2], e });
-            return 1;
-        };
-    } else .{ .object = .empty };
-    const partials = if (args.len > 3) blk: {
-        const src = Io.Dir.cwd().readFileAlloc(io, args[3], arena, .limited(1 << 30)) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[3], e });
-            return 1;
-        };
-        break :blk std.json.parseFromSliceLeaky(std.json.Value, arena, src, .{}) catch |e| {
-            std.debug.print("{s}: {t}\n", .{ args[3], e });
-            return 1;
-        };
-    } else .null;
+    const template = readFile(io, arena, args[1]) orelse return 1;
+    const data: std.json.Value = if (args.len > 2) readJson(io, arena, args[2]) orelse return 1 else .{ .object = .empty };
+    const partials: std.json.Value = if (args.len > 3) readJson(io, arena, args[3]) orelse return 1 else .null;
 
     var buf: [64 * 1024]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &buf);
@@ -47,4 +26,21 @@ pub fn main(init: std.process.Init) !u8 {
     try stdout.flush();
 
     return 0;
+}
+
+/// Prints the error and returns null if the file cannot be read.
+fn readFile(io: Io, arena: std.mem.Allocator, path: []const u8) ?[]u8 {
+    return Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(1 << 30)) catch |e| {
+        std.debug.print("{s}: {t}\n", .{ path, e });
+        return null;
+    };
+}
+
+/// Prints the error and returns null if the file cannot be read or is not JSON.
+fn readJson(io: Io, arena: std.mem.Allocator, path: []const u8) ?std.json.Value {
+    const src = readFile(io, arena, path) orelse return null;
+    return std.json.parseFromSliceLeaky(std.json.Value, arena, src, .{}) catch |e| {
+        std.debug.print("{s}: {t}\n", .{ path, e });
+        return null;
+    };
 }

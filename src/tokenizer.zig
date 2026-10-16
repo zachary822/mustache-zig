@@ -142,27 +142,25 @@ pub const Tokenizer = struct {
         if (value.len == 0 and kind != .comment) return error.EmptyTag;
 
         if (kind != .comment and kind != .set_delimiters) {
-            for (value) |ch| switch (ch) {
-                ' ', '\t', '\r', '\n' => return error.BadName,
-                else => {},
-            };
+            if (std.mem.findAny(u8, value, " \t\r\n") != null) return error.BadName;
             // {{{ }}} tags cannot contain }} inside it
             if (close.len != self.close.len and std.mem.find(u8, value, self.close) != null) return error.BadName;
         }
 
-        if (kind == .set_delimiters) {
-            var parts = std.mem.tokenizeAny(u8, value, " \t\r\n");
-            const new_open = parts.next() orelse return error.BadDelimiters;
-            const new_close = parts.next() orelse return error.BadDelimiters;
-            if (parts.next()) |_| {
-                return error.BadDelimiters;
-            }
-            self.open = new_open;
-            self.close = new_close;
-            self.delims = value;
-        }
+        if (kind == .set_delimiters) try self.setDelims(value);
 
         return .{ .kind = kind, .value = value, .start = start, .end = end, .dynamic = dynamic };
+    }
+
+    /// `delims` is the text between `=` and `=`, for example "<% %>".
+    pub fn setDelims(self: *Tokenizer, delims: []const u8) Error!void {
+        var parts = std.mem.tokenizeAny(u8, delims, " \t\r\n");
+        const open = parts.next() orelse return error.BadDelimiters;
+        const close = parts.next() orelse return error.BadDelimiters;
+        if (parts.next() != null) return error.BadDelimiters;
+        self.open = open;
+        self.close = close;
+        self.delims = delims;
     }
 
     fn clearLeft(self: *const Tokenizer, start: usize) ?usize {
